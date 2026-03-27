@@ -1,0 +1,14 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Minimal valid PyPI release fixture used by the testing workflow.
+# Satisfies required fields of release-pypi-schema.yaml from
+# lfit/releng-global-jjb (log_dir, pypi_project, python_version, version).
+
+log_dir: "test-job/42"
+pypi_project: "test-project"
+python_version: "3.11"
+version: "1.0.0"
+git_tag: "v1.0.0"
+tag_release: true

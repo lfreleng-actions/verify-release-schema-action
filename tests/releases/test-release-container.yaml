@@ -1,0 +1,20 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Minimal valid container release fixture used by the testing workflow.
+# Satisfies required fields of release-container-schema.yaml from
+# lfit/releng-global-jjb (containers, distribution_type, project,
+# container_release_tag, ref).
+
+distribution_type: "container"
+project: "test-project"
+container_release_tag: "v1.0.0"
+ref: "0123456789abcdef0123456789abcdef01234567"
+git_tag: "v1.0.0"
+container_pull_registry: "nexus3.example.org:10001"
+container_push_registry: "nexus3.example.org:10002"
+containers:
+  - name: "test-image"
+    version: "1.0.0-20250101T000000Z"
+tag_release: true

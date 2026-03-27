@@ -1,0 +1,14 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Minimal valid Maven release fixture used by the testing workflow.
+# Satisfies required fields of release-schema.yaml from
+# lfit/releng-global-jjb (distribution_type, log_dir, project, version).
+
+distribution_type: "maven"
+log_dir: "test-job/42"
+project: "test-project"
+version: "1.0.0"
+git_tag: "v1.0.0"
+tag_release: true
