@@ -48,7 +48,8 @@ jobs:
       - name: "Running local action: ${{ github.repository }}"
         uses: ./
         with:
-          input: "test input 💬"
+          distribution-type: "maven"
+          release-file: "releases/test-release.yaml"
 
       - name: "Validated local action: ${{ github.repository }}"
         shell: bash
@@ -63,7 +64,8 @@ jobs:
         id: failure
         continue-on-error: true
         with:
-          invalid_input: "Some garbage"
+          distribution-type: "unsupported-type"
+          release-file: "releases/nonexistent.yaml"
 
       # Failure testing is also important
       - name: "Error if step above did NOT fail"

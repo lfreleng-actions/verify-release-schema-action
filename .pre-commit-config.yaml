@@ -102,7 +102,7 @@ repos:
 
   # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
   - repo: https://github.com/DetachHead/basedpyright-prek-mirror
-    rev: f391127ab7cab6e18596c2f1e3d938193919c0fd  # frozen: 1.38.2
+    rev: d58fe7fc44458fa7e41e2d38c04598a3c87833f2  # frozen: 1.38.3
     hooks:
       - id: basedpyright
 
