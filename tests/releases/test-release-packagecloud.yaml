@@ -1,0 +1,17 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Minimal valid packagecloud release fixture used by the testing
+# workflow. Satisfies required fields of
+# release-packagecloud-schema.yaml from lfit/releng-global-jjb
+# (package_name, packages, ref, log_dir, version).
+
+package_name: "test-package"
+packages:
+  - name: "test-package-1.0.0.deb"
+ref: "0123456789abcdef0123456789abcdef01234567"
+log_dir: "test-job/42"
+version: "1.0.0"
+git_tag: "v1.0.0"
+tag_release: true

@@ -1,0 +1,16 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Minimal valid artifact release fixture used by the testing workflow.
+# Satisfies required fields of release-artifact-schema.yaml from
+# lfit/releng-global-jjb (distribution_type, project, version, artifacts).
+
+distribution_type: "artifact"
+project: "test-project"
+version: "1.0.0"
+git_tag: "v1.0.0"
+tag_release: true
+artifacts:
+  - name: "test-artifact"
+    path: "artifacts/test-artifact-1.0.0.tar.gz"

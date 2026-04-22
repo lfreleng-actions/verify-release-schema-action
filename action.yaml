@@ -2,36 +2,126 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2025 The Linux Foundation
 
-# actions-template
-name: "🛠️ Actions Template"
-description: "Description of action"
-# Any relevant notes/observations can go here
+name: "verify-release-schema"
+description: "Verify a release file's contents against an approved schema"
 
 inputs:
-  input:
-    description: "Description of input"
+  distribution-type:
+    description: >
+      The content type of the release. Accepted values (case-sensitive,
+      lowercase): artifact, container, maven, packagecloud, pypi.
     required: true
-
-outputs:
-  output:
-    description: "Description of output"
-    value: ${{ steps.code.outputs.output }}
+  release-file:
+    description: "File that describes the release contents"
+    required: true
+  lftools-uv-version:
+    description: >
+      Optional exact version of lftools-uv to run via uvx. When set,
+      the value is interpolated into `lftools-uv==<value>`, so it
+      MUST be a plain version string (for example `0.1.8`), not a
+      full PEP 440 pip specifier. Leave unset (the default) to use
+      the latest version published on PyPI.
+    required: false
+    default: ""
+  schema-ref:
+    description: >
+      Git ref (branch, tag or commit SHA) of lfit/releng-global-jjb to
+      fetch the schema from. Defaults to a pinned commit for reproducibility.
+    required: false
+    # Pinned to the latest commit touching the `schema/` directory at the
+    # time of writing to give deterministic validation results. Override
+    # via input when a newer schema revision is required.
+    default: "09659ce65d005b15595a44bbef6304fd3cc83ac1"
 
 runs:
   using: "composite"
   steps:
-    - name: "Friendly Name"
-      id: code
-      shell: bash
-      run: |
-        # Friendly Name
-        input="${{ inputs.input }}"
-        if [ -z "$input" ]; then
-          echo "Error: mandatory input was not set/configured ❌"
-          exit 1
-        fi
+    # Install uv (which provides `uvx`) on the runner. uvx creates an
+    # isolated virtual environment for the lftools-uv invocation, so we
+    # do not pollute the runner's global Python environment.
+    - name: "Install uv"
+      id: install-uv
+      # yamllint disable-line rule:line-length
+      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      with:
+        # Enable uv's built-in cache between runs to speed up repeated
+        # invocations in CI.
+        enable-cache: true
 
-        echo "output=$input" >> "$GITHUB_ENV"
-        echo "output=$input" >> "$GITHUB_OUTPUT"
-        echo "Action received: $input ✅"
-        echo "Action received: $input ✅" >> "$GITHUB_STEP_SUMMARY"
+    - name: "Set release schema"
+      id: set-release-schema
+      shell: bash
+      env:
+        DISTRIBUTION_TYPE: "${{ inputs['distribution-type'] }}"
+      run: |
+        # Map the distribution type to the corresponding schema file name
+        case "${DISTRIBUTION_TYPE}" in
+          artifact)
+            release_schema="release-artifact-schema.yaml"
+            ;;
+          container)
+            release_schema="release-container-schema.yaml"
+            ;;
+          maven)
+            release_schema="release-schema.yaml"
+            ;;
+          packagecloud)
+            release_schema="release-packagecloud-schema.yaml"
+            ;;
+          pypi)
+            release_schema="release-pypi-schema.yaml"
+            ;;
+          *)
+            echo "ERROR: unsupported distribution-type: ${DISTRIBUTION_TYPE}"
+            echo "Supported: artifact, container, maven, packagecloud, pypi"
+            exit 1
+            ;;
+        esac
+        echo "INFO: Schema to compare: ${release_schema}"
+        echo "USE_SCHEMA=${release_schema}" >> "$GITHUB_ENV"
+
+    - name: "Download and compare schema"
+      id: download-and-compare-schema
+      shell: bash
+      env:
+        RELEASE_FILE: "${{ inputs['release-file'] }}"
+        SCHEMA_REF: "${{ inputs['schema-ref'] }}"
+        LFTOOLS_UV_VERSION: "${{ inputs['lftools-uv-version'] }}"
+      # yamllint disable-line rule:line-length
+      run: |
+        # Fail fast on any command error, undefined variable, or
+        # failing pipeline stage so a bad curl/uvx invocation cannot
+        # silently fall through to a later step.
+        set -euo pipefail
+
+        # Fetch the schema from lfit/releng-global-jjb at the pinned
+        # ref. Use curl (present on all GitHub-hosted runners) so we
+        # don't rely on wget being installed. Download into a unique
+        # directory under ${RUNNER_TEMP} (falling back to $(mktemp -d)
+        # when the variable is not set) so we never write into the
+        # consumer's workspace, never clobber a same-named file that
+        # may already exist there, and leave no residue behind.
+        schema_base="https://raw.githubusercontent.com/lfit/releng-global-jjb"
+        schema_url="${schema_base}/${SCHEMA_REF}/schema/${USE_SCHEMA}"
+        runner_tmp="${RUNNER_TEMP:-$(mktemp -d)}"
+        schema_dir="$(mktemp -d -p "${runner_tmp}" vrs.XXXXXX)"
+        trap 'rm -rf "${schema_dir}"' EXIT
+        schema_path="${schema_dir}/${USE_SCHEMA}"
+        tmp_schema="${schema_path}.part"
+        echo "INFO: Fetching schema from ${schema_url}"
+        curl -sSfL -o "${tmp_schema}" "${schema_url}"
+        mv "${tmp_schema}" "${schema_path}"
+
+        echo "INFO: Verifying ${RELEASE_FILE} against schema ${USE_SCHEMA}"
+        # Run lftools-uv via uvx; uvx creates an isolated, cached
+        # environment for the requested package and executes its CLI
+        # entry point. The `lftools-uv` command exposes the same
+        # `schema verify YAMLFILE SCHEMAFILE` sub-command as the legacy
+        # `lftools` tool.
+        if [ -n "${LFTOOLS_UV_VERSION}" ]; then
+            spec="lftools-uv==${LFTOOLS_UV_VERSION}"
+        else
+            spec="lftools-uv"
+        fi
+        uvx --from "${spec}" lftools-uv schema verify \
+            "${RELEASE_FILE}" "${schema_path}"

@@ -1,0 +1,12 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Intentionally invalid Maven release fixture used by the testing
+# workflow to verify that schema validation fails when required fields
+# are missing. The release-schema.yaml from lfit/releng-global-jjb
+# requires: distribution_type, log_dir, project, version. This file
+# omits "log_dir" and "version" so validation MUST fail.
+
+distribution_type: "maven"
+project: "test-project"

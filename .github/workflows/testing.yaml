@@ -19,6 +19,13 @@ concurrency:
 
 permissions: {}
 
+# Pin lftools-uv-version in this repo's CI so action tests are
+# reproducible and don't depend on whatever version of lftools-uv
+# happens to be the latest on PyPI on a given day. Consumers of the
+# action still get latest by default (see the action's input contract).
+env:
+  LFTOOLS_UV_VERSION: "0.1.8"
+
 jobs:
   ### Test the GitHub Action in this Repository ###
   tests:
@@ -26,7 +33,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10 # Increase this timeout value as needed
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: "maven"
+            fixture: "tests/releases/test-release-maven.yaml"
+          - distribution: "container"
+            fixture: "tests/releases/test-release-container.yaml"
+          - distribution: "artifact"
+            fixture: "tests/releases/test-release-artifact.yaml"
+          - distribution: "packagecloud"
+            fixture: "tests/releases/test-release-packagecloud.yaml"
+          - distribution: "pypi"
+            fixture: "tests/releases/test-release-pypi.yaml"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -35,41 +56,122 @@ jobs:
           egress-policy: audit
 
       - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
-      # Perform setup prior to running test(s)
-      - name: "Testing setup step"
-        shell: bash
-        run: |
-          # Testing setup step
-          echo "Testing setup step"
-          echo "Testing setup step/summary output" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: "Running local action: ${{ github.repository }}"
+      # ----------------------------------------------------------------
+      # Success path: validate a well-formed release file against the
+      # corresponding schema. Each matrix entry exercises a different
+      # distribution-type so we get coverage across supported schemas.
+      # ----------------------------------------------------------------
+      - name: "Verify ${{ matrix.distribution }} release (success)"
         uses: ./
         with:
-          input: "test input 💬"
+          distribution-type: "${{ matrix.distribution }}"
+          release-file: "${{ matrix.fixture }}"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
 
-      - name: "Validated local action: ${{ github.repository }}"
+      - name: "Success path validated: ${{ matrix.distribution }}"
         shell: bash
+        env:
+          DIST: "${{ matrix.distribution }}"
         run: |
-          # Local action validation
-          echo "Validated local action: ${{ github.repository }}"
-          echo "Validation step summary output" >> "$GITHUB_STEP_SUMMARY"
+          # Report success to the workflow summary
+          msg="Validated ${DIST} release ✅"
+          echo "${msg}"
+          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
 
+  # Dedicated job for failure-path testing so matrix parallelism doesn't
+  # hide regressions specific to a single negative case.
+  failure-tests:
+    name: "Test failure cases"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
-      - name: "Running local action: ${{ github.repository }} [Override Failure]"
-        uses: ./
-        id: failure
-        continue-on-error: true
+      - uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
         with:
-          invalid_input: "Some garbage"
+          egress-policy: audit
 
-      # Failure testing is also important
-      - name: "Error if step above did NOT fail"
-        if: steps.failure.outcome == 'success'
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      # ----------------------------------------------------------------
+      # Failure path 1: unsupported distribution-type should cause the
+      # action to exit non-zero (fail fast), even though the release
+      # file path is otherwise valid.
+      # ----------------------------------------------------------------
+      - name: "Unsupported distribution-type (should fail)"
+        id: unsupported
+        continue-on-error: true
+        uses: ./
+        with:
+          distribution-type: "unsupported-type"
+          release-file: "tests/releases/test-release-maven.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Assert unsupported distribution-type failed"
+        if: steps.unsupported.outcome == 'success'
         shell: bash
         run: |
-          # Error if step above did NOT fail
-          echo "Error: previous test step did NOT fail ❌"
+          # The action must fail fast on unknown distribution-type values
+          echo "ERROR: unsupported distribution-type did NOT fail ❌"
           exit 1
+
+      # ----------------------------------------------------------------
+      # Failure path 2: a release file that does NOT satisfy the schema
+      # must produce a non-zero exit from lftools schema verify.
+      # ----------------------------------------------------------------
+      - name: "Invalid release file (should fail)"
+        id: invalid
+        continue-on-error: true
+        uses: ./
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/test-release-invalid.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Assert invalid release file failed"
+        if: steps.invalid.outcome == 'success'
+        shell: bash
+        run: |
+          # A release file missing required fields must fail validation
+          echo "ERROR: invalid release file did NOT fail schema check ❌"
+          exit 1
+
+      # ----------------------------------------------------------------
+      # Failure path 3: a missing release file should also cause the
+      # action to fail (lftools cannot open the file).
+      # ----------------------------------------------------------------
+      - name: "Missing release file (should fail)"
+        id: missing
+        continue-on-error: true
+        uses: ./
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/does-not-exist.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Assert missing release file failed"
+        if: steps.missing.outcome == 'success'
+        shell: bash
+        run: |
+          # A missing release file must not silently succeed
+          echo "ERROR: missing release file did NOT fail ❌"
+          exit 1
+
+      - name: "All failure-path assertions passed"
+        shell: bash
+        run: |
+          # Report aggregated failure-path success to the workflow summary
+          msg="All failure-path assertions passed ✅"
+          echo "${msg}"
+          echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
