@@ -78,12 +78,13 @@ runs:
             ;;
         esac
         echo "INFO: Schema to compare: ${release_schema}"
-        echo "USE_SCHEMA=${release_schema}" >> "$GITHUB_ENV"
+        echo "use_schema=${release_schema}" >> "$GITHUB_OUTPUT"
 
     - name: "Download and compare schema"
       id: download-and-compare-schema
       shell: bash
       env:
+        USE_SCHEMA: "${{ steps.set-release-schema.outputs.use_schema }}"
         RELEASE_FILE: "${{ inputs['release-file'] }}"
         SCHEMA_REF: "${{ inputs['schema-ref'] }}"
         LFTOOLS_UV_VERSION: "${{ inputs['lftools-uv-version'] }}"
