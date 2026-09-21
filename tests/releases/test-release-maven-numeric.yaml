@@ -1,0 +1,23 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Regression fixture: schema-valid, but carries an unquoted
+# numeric-looking value where a string was written.
+#
+# YAML 1.1 reads a leading zero as octal, so the `ref` below loads as
+# the integer 83. Publishing "83" would silently rewrite the release
+# coordinate, so extraction must refuse it. Quoting preserves it.
+#
+# The same hazard costs precision elsewhere: an unquoted
+# `version: 1.10` loads as the float 1.1 and loses its trailing zero.
+#
+# As with the other guard fixtures, validation passing is the point:
+# the schema neither declares `ref` nor forbids additional properties,
+# so only the extractor can catch this.
+
+distribution_type: "maven"
+log_dir: "test-job/46"
+project: "test-project"
+version: "5.0.0"
+ref: 0123

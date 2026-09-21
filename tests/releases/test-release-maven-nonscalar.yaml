@@ -1,0 +1,21 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Regression fixture: schema-valid, but carries a non-scalar where the
+# action publishes a scalar output.
+#
+# The pinned maven schema neither declares `ref` nor forbids additional
+# properties, so this file passes validation. Extraction must then
+# refuse it rather than publish Python's repr of the list ("['abc']")
+# through an output documented as a scalar.
+#
+# Validation passing is the point of the fixture: it proves the guard
+# lives in extraction, where a release file can still surprise it, and
+# not in the schema.
+
+distribution_type: "maven"
+log_dir: "test-job/44"
+project: "test-project"
+version: "3.0.0"
+ref: ["abc"]
