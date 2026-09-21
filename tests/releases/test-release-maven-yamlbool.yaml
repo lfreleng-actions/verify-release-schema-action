@@ -1,0 +1,22 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Regression fixture: schema-valid, but carries a YAML 1.1 boolean
+# where a string was written.
+#
+# PyYAML coerces the unquoted `on` below to True, and the original
+# text is gone by the time extraction sees it. Publishing `true` would
+# silently rewrite the authored ref, so extraction must refuse rather
+# than guess. Quoting the value ("on") preserves it.
+#
+# As with the non-scalar fixture, validation passing is the point:
+# the schema neither declares `ref` nor forbids additional properties,
+# so only the extractor can catch this.
+
+distribution_type: "maven"
+log_dir: "test-job/45"
+project: "test-project"
+version: "4.0.0"
+# yamllint disable-line rule:truthy
+ref: on

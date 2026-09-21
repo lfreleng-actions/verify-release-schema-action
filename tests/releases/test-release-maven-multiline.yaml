@@ -1,0 +1,16 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Exercises the multiline output path.
+#
+# Every other fixture carries single-line scalars, so the heredoc
+# serialisation -- the part that stops a crafted value forging further
+# outputs -- goes untested. The project field below contains a literal
+# newline, so the value must survive GITHUB_OUTPUT intact, line break
+# included.
+
+distribution_type: "maven"
+log_dir: "test-job/48"
+project: "first line\nsecond line"
+version: "7.0.0"

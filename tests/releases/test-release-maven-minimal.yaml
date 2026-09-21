@@ -1,0 +1,20 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Minimal valid Maven release fixture covering the optional-field paths
+# the main maven fixture does not reach, and matching the shape real
+# ONAP release files take: no git_tag, tag_release explicitly false,
+# and a ref rather than relying on log_dir alone.
+#
+# Exercises three output behaviours:
+#   * git_tag absent      -> empty string, not an error
+#   * tag_release: false  -> the string 'false', not Python's 'False'
+#   * ref present         -> carried through on a maven release
+
+distribution_type: "maven"
+log_dir: "test-job/43"
+project: "test-project-minimal"
+version: "2.0.0"
+ref: "89abcdef0123456789abcdef0123456789abcdef"
+tag_release: false
