@@ -33,6 +33,49 @@ inputs:
     # via input when a newer schema revision is required.
     default: "09659ce65d005b15595a44bbef6304fd3cc83ac1"
 
+# Scalar fields common to the release schemas. Without these a consumer
+# re-parses the release file itself, duplicating the YAML handling this
+# action already performs and risking the two disagreeing.
+#
+# Values are emitted verbatim. git_tag in particular is NOT defaulted to
+# version: global-jjb's release-job.sh applies that fallback, but doing
+# it here would report a value the file does not contain, and a caller
+# wanting the fallback can express it in a single expression.
+#
+# Only fields the release lanes consume appear here. Type-specific
+# scalars (package_name, pypi_project, container_release_tag) and the
+# list-valued fields (artifacts, containers, packages) are deliberately
+# absent; outputs must be declared statically, so adding them is a
+# decision to take per consumer rather than preemptively.
+outputs:
+  distribution_type:
+    description: "Release content type declared in the release file"
+    value: "${{ steps.release-fields.outputs.distribution_type }}"
+  project:
+    description: "Project the release file names"
+    value: "${{ steps.release-fields.outputs.project }}"
+  version:
+    description: "Version being released"
+    value: "${{ steps.release-fields.outputs.version }}"
+  git_tag:
+    description: >
+      Git tag named by the release file. Empty when absent; callers
+      wanting global-jjb's fallback should use `git_tag || version`.
+    value: "${{ steps.release-fields.outputs.git_tag }}"
+  log_dir:
+    description: >
+      Jenkins log directory locating the staging build. Empty when
+      absent.
+    value: "${{ steps.release-fields.outputs.log_dir }}"
+  ref:
+    description: "Commit the release was built from. Empty when absent."
+    value: "${{ steps.release-fields.outputs.ref }}"
+  tag_release:
+    description: >
+      Whether to tag the repository, as 'true' or 'false'. Empty when
+      the field is absent; global-jjb treats absent as true.
+    value: "${{ steps.release-fields.outputs.tag_release }}"
+
 runs:
   using: "composite"
   steps:
@@ -126,3 +169,141 @@ runs:
         fi
         uvx --from "${spec}" lftools-uv schema verify \
             "${RELEASE_FILE}" "${schema_path}"
+
+    # Runs only once validation has passed, since a composite action
+    # stops at the first failing step. Outputs therefore describe a
+    # file already known to satisfy its schema, and a caller can read
+    # them without re-checking validity.
+    - name: "Extract release fields"
+      id: release-fields
+      shell: bash
+      env:
+        RELEASE_FILE: "${{ inputs['release-file'] }}"
+      run: |
+        set -euo pipefail
+
+        # Parse with PyYAML rather than grep/sed. The release file is
+        # YAML, so quoting, comments and type coercion (tag_release is
+        # a boolean) all need real parsing; a regex would appear to
+        # work on the fixtures and mis-read a file in the field.
+        runner_tmp="${RUNNER_TEMP:-$(mktemp -d)}"
+        work_dir="$(mktemp -d -p "${runner_tmp}" vrs-fields.XXXXXX)"
+        trap 'rm -rf "${work_dir}"' EXIT
+
+        cat > "${work_dir}/extract.py" <<'PYEOF'
+        """Emit release file scalars as GitHub Actions step outputs."""
+        import os
+        import secrets
+        import sys
+
+        import yaml
+
+        FIELDS = (
+            "distribution_type",
+            "project",
+            "version",
+            "git_tag",
+            "log_dir",
+            "ref",
+            "tag_release",
+        )
+
+        with open(os.environ["RELEASE_FILE"], encoding="utf-8") as handle:
+            document = yaml.safe_load(handle)
+
+        # A schema-valid release file is a mapping. Guard anyway: this
+        # reads a file an untrusted change may have authored, and
+        # .get() on a list raises an opaque AttributeError.
+        if not isinstance(document, dict):
+            print("ERROR: release file is not a YAML mapping", file=sys.stderr)
+            raise SystemExit(1)
+
+        MISSING = object()
+
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+            for field in FIELDS:
+                # A sentinel, not .get(field), because .get() returns
+                # None for both an absent key and an explicit null.
+                # Absence is legitimate and maps to an empty output;
+                # 'ref: null' is a value present in the file that is
+                # not a string, and belongs with the other type
+                # rejections below.
+                value = document.get(field, MISSING)
+                if value is MISSING:
+                    text = ""
+                elif field == "tag_release" and isinstance(value, bool):
+                    # The one field the schemas type as a boolean.
+                    # Rendered as 'true'/'false', not Python's
+                    # 'True'/'False'.
+                    text = "true" if value else "false"
+                elif isinstance(value, str):
+                    text = value
+                else:
+                    # Everything else is refused rather than coerced.
+                    # The schemas neither declare every field nor
+                    # forbid additional properties, so a release file
+                    # can put any YAML type here, and PyYAML has
+                    # already discarded the authored text by now:
+                    #
+                    #   ref: on      -> True  -> would publish 'true'
+                    #   ref: 0123    -> 83    -> octal, per YAML 1.1
+                    #   ref: [abc]   -> list  -> would publish "['abc']"
+                    #   ref: null    -> None  -> indistinguishable
+                    #                            from an absent field
+                    #
+                    # Each would silently rewrite a release
+                    # coordinate, breaking the verbatim contract these
+                    # outputs document. Quoting preserves the text.
+                    #
+                    # The expected type is per-field: tag_release is
+                    # the one the schemas type as a boolean, so
+                    # directing its author to quote the value would
+                    # send them to the wrong fix.
+                    expected = (
+                        "a boolean" if field == "tag_release"
+                        else "a quoted string"
+                    )
+                    print(
+                        f"ERROR: {field} is {type(value).__name__}, "
+                        f"expected {expected}",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+
+                # Heredoc form with a random delimiter. Values come from
+                # a file a contributor controls, so a newline in one
+                # would otherwise let it forge further outputs.
+                delimiter = f"EOF_{secrets.token_hex(16)}"
+                while delimiter in text:
+                    delimiter = f"EOF_{secrets.token_hex(16)}"
+                out.write(f"{field}<<{delimiter}\n{text}\n{delimiter}\n")
+
+                # Log only whether the field is set, never its value.
+                # text is contributor-controlled, and a value
+                # containing a line such as ::stop-commands:: or
+                # ::add-mask:: would be read as a workflow command by
+                # the runner. The heredoc above protects
+                # GITHUB_OUTPUT; stdout needs protecting separately.
+                state = "set" if text else "unset"
+                print(f"INFO: {field} {state}")
+        PYEOF
+
+        # uv is already on PATH from the setup step above; --with keeps
+        # PyYAML in an isolated environment rather than installing it
+        # into whatever Python the runner happens to ship. --no-project
+        # stops uv discovering and syncing a pyproject.toml belonging to
+        # the caller, whose workspace this composite step runs in:
+        # without it, extraction could fail on the caller's unrelated
+        # dependency constraints, or mutate their environment.
+        #
+        # PyYAML is pinned, matching how this action pins schema-ref and
+        # lets callers pin lftools-uv-version. An unconstrained spec
+        # would resolve the latest release on every invocation, so a
+        # caller who had pinned the action SHA, the schema ref and the
+        # lftools-uv version still could not reproduce a run, and an
+        # upstream release or yank could break the action with no change
+        # here. Deliberately not a caller input: PyYAML is an internal
+        # implementation detail, and only safe_load is used, which has
+        # been stable across the 6.x series.
+        uv run --quiet --no-project --with 'pyyaml==6.0.3' python \
+            "${work_dir}/extract.py"

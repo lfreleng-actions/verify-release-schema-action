@@ -30,6 +30,13 @@ permissions: {}
 # action still get latest by default (see the action's input contract).
 env:
   LFTOOLS_UV_VERSION: "0.1.8"
+  # Pin the schema revision for the same reason, and pass it to every
+  # invocation below rather than leaning on the action's own default.
+  # The non-scalar regression test validates its fixture separately
+  # before invoking the action; were the two to resolve different
+  # schema revisions, the precheck could pass while the action failed
+  # validation, and that test would then pass on the wrong failure.
+  SCHEMA_REF: "09659ce65d005b15595a44bbef6304fd3cc83ac1"
 
 jobs:
   ### Test the GitHub Action in this Repository ###
@@ -42,17 +49,80 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Expected outputs are declared per fixture rather than derived,
+        # so a change in extraction behaviour has to be restated here
+        # deliberately. Empty strings are meaningful: they assert the
+        # documented absent-field contract, not an absence of coverage.
         include:
           - distribution: "maven"
             fixture: "tests/releases/test-release-maven.yaml"
+            want_distribution_type: "maven"
+            want_project: "test-project"
+            want_version: "1.0.0"
+            want_git_tag: "v1.0.0"
+            want_log_dir: "test-job/42"
+            want_ref: ""
+            want_tag_release: "true"
+          # Optional-field coverage: no git_tag, tag_release false, and
+          # a ref on a maven release. Matches real ONAP release files.
+          - distribution: "maven"
+            fixture: "tests/releases/test-release-maven-minimal.yaml"
+            want_distribution_type: "maven"
+            want_project: "test-project-minimal"
+            want_version: "2.0.0"
+            want_git_tag: ""
+            want_log_dir: "test-job/43"
+            want_ref: "89abcdef0123456789abcdef0123456789abcdef"
+            want_tag_release: "false"
+          # Multiline coverage. Every other fixture carries single-line
+          # scalars, so without this the heredoc serialisation -- the
+          # part that stops a crafted value forging further outputs --
+          # goes untested. The newline must survive intact.
+          - distribution: "maven"
+            fixture: "tests/releases/test-release-maven-multiline.yaml"
+            want_distribution_type: "maven"
+            want_project: "first line\nsecond line"
+            want_version: "7.0.0"
+            want_git_tag: ""
+            want_log_dir: "test-job/48"
+            want_ref: ""
+            want_tag_release: ""
           - distribution: "container"
             fixture: "tests/releases/test-release-container.yaml"
+            want_distribution_type: "container"
+            want_project: "test-project"
+            want_version: ""
+            want_git_tag: "v1.0.0"
+            want_log_dir: ""
+            want_ref: "0123456789abcdef0123456789abcdef01234567"
+            want_tag_release: "true"
           - distribution: "artifact"
             fixture: "tests/releases/test-release-artifact.yaml"
+            want_distribution_type: "artifact"
+            want_project: "test-project"
+            want_version: "1.0.0"
+            want_git_tag: "v1.0.0"
+            want_log_dir: ""
+            want_ref: ""
+            want_tag_release: "true"
           - distribution: "packagecloud"
             fixture: "tests/releases/test-release-packagecloud.yaml"
+            want_distribution_type: ""
+            want_project: ""
+            want_version: "1.0.0"
+            want_git_tag: "v1.0.0"
+            want_log_dir: "test-job/42"
+            want_ref: "0123456789abcdef0123456789abcdef01234567"
+            want_tag_release: "true"
           - distribution: "pypi"
             fixture: "tests/releases/test-release-pypi.yaml"
+            want_distribution_type: ""
+            want_project: ""
+            want_version: "1.0.0"
+            want_git_tag: "v1.0.0"
+            want_log_dir: "test-job/42"
+            want_ref: ""
+            want_tag_release: "true"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -72,11 +142,68 @@ jobs:
       # distribution-type so we get coverage across supported schemas.
       # ----------------------------------------------------------------
       - name: "Verify ${{ matrix.distribution }} release (success)"
-        uses: ./
+        id: verify
+        uses: $/.
         with:
           distribution-type: "${{ matrix.distribution }}"
           release-file: "${{ matrix.fixture }}"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+          schema-ref: "${{ env.SCHEMA_REF }}"
+
+      # Assert every declared output against the fixture's expected
+      # value. All seven are checked on every fixture, including the
+      # ones expected to be empty: a partial check would let incorrect
+      # wiring, a wrong value, or a regression in the documented
+      # absent-field behaviour pass CI unnoticed.
+      - name: "Assert outputs for ${{ matrix.fixture }}"
+        shell: bash
+        env:
+          WANT_DISTRIBUTION_TYPE: "${{ matrix.want_distribution_type }}"
+          WANT_PROJECT: "${{ matrix.want_project }}"
+          WANT_VERSION: "${{ matrix.want_version }}"
+          WANT_GIT_TAG: "${{ matrix.want_git_tag }}"
+          WANT_LOG_DIR: "${{ matrix.want_log_dir }}"
+          WANT_REF: "${{ matrix.want_ref }}"
+          WANT_TAG_RELEASE: "${{ matrix.want_tag_release }}"
+          GOT_DISTRIBUTION_TYPE: "${{ steps.verify.outputs.distribution_type }}"
+          GOT_PROJECT: "${{ steps.verify.outputs.project }}"
+          GOT_VERSION: "${{ steps.verify.outputs.version }}"
+          GOT_GIT_TAG: "${{ steps.verify.outputs.git_tag }}"
+          GOT_LOG_DIR: "${{ steps.verify.outputs.log_dir }}"
+          GOT_REF: "${{ steps.verify.outputs.ref }}"
+          GOT_TAG_RELEASE: "${{ steps.verify.outputs.tag_release }}"
+        run: |
+          set -euo pipefail
+          rc=0
+
+          check() {
+            # $1 output name, $2 expected, $3 actual
+            if [ "$2" != "$3" ]; then
+              # %q escapes both values onto a single line. The actual
+              # value originates in a release file, and a multiline
+              # scalar could otherwise put a line such as
+              # ::stop-commands:: on stdout, which the runner treats
+              # as a workflow command.
+              printf 'ERROR: %s: expected %q, got %q ❌\n' "$1" "$2" "$3"
+              rc=1
+            fi
+          }
+
+          check distribution_type \
+            "${WANT_DISTRIBUTION_TYPE}" "${GOT_DISTRIBUTION_TYPE}"
+          check project "${WANT_PROJECT}" "${GOT_PROJECT}"
+          check version "${WANT_VERSION}" "${GOT_VERSION}"
+          check git_tag "${WANT_GIT_TAG}" "${GOT_GIT_TAG}"
+          check log_dir "${WANT_LOG_DIR}" "${GOT_LOG_DIR}"
+          check ref "${WANT_REF}" "${GOT_REF}"
+          # Guards YAML boolean serialisation: 'true'/'false', never
+          # Python's 'True'/'False'.
+          check tag_release "${WANT_TAG_RELEASE}" "${GOT_TAG_RELEASE}"
+
+          if [ "${rc}" -eq 0 ]; then
+            echo "All seven outputs match fixture ✅"
+          fi
+          exit "${rc}"
 
       - name: "Success path validated: ${{ matrix.distribution }}"
         shell: bash
@@ -117,11 +244,12 @@ jobs:
       - name: "Unsupported distribution-type (should fail)"
         id: unsupported
         continue-on-error: true
-        uses: ./
+        uses: $/.
         with:
           distribution-type: "unsupported-type"
           release-file: "tests/releases/test-release-maven.yaml"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+          schema-ref: "${{ env.SCHEMA_REF }}"
 
       - name: "Assert unsupported distribution-type failed"
         if: steps.unsupported.outcome == 'success'
@@ -138,11 +266,12 @@ jobs:
       - name: "Invalid release file (should fail)"
         id: invalid
         continue-on-error: true
-        uses: ./
+        uses: $/.
         with:
           distribution-type: "maven"
           release-file: "tests/releases/test-release-invalid.yaml"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+          schema-ref: "${{ env.SCHEMA_REF }}"
 
       - name: "Assert invalid release file failed"
         if: steps.invalid.outcome == 'success'
@@ -159,11 +288,12 @@ jobs:
       - name: "Missing release file (should fail)"
         id: missing
         continue-on-error: true
-        uses: ./
+        uses: $/.
         with:
           distribution-type: "maven"
           release-file: "tests/releases/does-not-exist.yaml"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+          schema-ref: "${{ env.SCHEMA_REF }}"
 
       - name: "Assert missing release file failed"
         if: steps.missing.outcome == 'success'
@@ -173,6 +303,7 @@ jobs:
           echo "ERROR: missing release file did NOT fail ❌"
           exit 1
 
+      # ----------------------------------------------------------------
       - name: "All failure-path assertions passed"
         shell: bash
         run: |
@@ -180,3 +311,100 @@ jobs:
           msg="All failure-path assertions passed ✅"
           echo "${msg}"
           echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
+
+  # Guards that live in extraction rather than the schema. Each fixture
+  # is schema-VALID but carries a value the outputs cannot publish
+  # faithfully, so the schema cannot catch it and only the extractor
+  # can. A matrix keeps them uniform: adding the next coercion hazard
+  # is a fixture plus one row.
+  extraction-guards:
+    name: "Test extraction guards"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - guard: "non-scalar"
+            fixture: "tests/releases/test-release-maven-nonscalar.yaml"
+            reason: "a list would publish Python's repr"
+          - guard: "YAML 1.1 boolean"
+            fixture: "tests/releases/test-release-maven-yamlbool.yaml"
+            reason: "'ref: on' would publish 'true'"
+          - guard: "YAML 1.1 numeric"
+            fixture: "tests/releases/test-release-maven-numeric.yaml"
+            reason: "'ref: 0123' would publish octal '83'"
+          # Without this, swapping the extractor's MISSING sentinel for
+          # a plain .get() would pass every other guard while silently
+          # publishing an explicit null as an empty output.
+          - guard: "explicit null"
+            fixture: "tests/releases/test-release-maven-null.yaml"
+            reason: "'ref: null' is a value, not an absent field"
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The precheck below runs uvx directly rather than through the
+      # action, so this job installs uv itself. Pinned to match the
+      # action's own setup step, so the precheck and the action agree
+      # on the toolchain as well as on the schema revision.
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4  # v10.1.0
+        with:
+          enable-cache: true
+
+      # The fixture MUST validate for the assertion below to mean
+      # anything. Were the schema to reject it, the action would fail
+      # for that reason and the test would pass without ever reaching
+      # the guard. No continue-on-error here, so that regression is
+      # loud rather than silent. Uses the same pinned schema revision
+      # the action invocation below receives.
+      - name: "Confirm ${{ matrix.guard }} fixture is schema-valid"
+        shell: bash
+        env:
+          FIXTURE: "${{ matrix.fixture }}"
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/lfit/releng-global-jjb"
+          schema="${RUNNER_TEMP}/release-schema.yaml"
+          curl -sSfL -o "${schema}" \
+            "${base}/${SCHEMA_REF}/schema/release-schema.yaml"
+          uvx --from "lftools-uv==${LFTOOLS_UV_VERSION}" \
+            lftools-uv schema verify "${FIXTURE}" "${schema}"
+          echo "Schema-valid, so only extraction can reject it ✅"
+
+      - name: "${{ matrix.guard }} (should fail)"
+        id: guard
+        continue-on-error: true
+        uses: $/.
+        with:
+          distribution-type: "maven"
+          release-file: "${{ matrix.fixture }}"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+          schema-ref: "${{ env.SCHEMA_REF }}"
+
+      - name: "Assert ${{ matrix.guard }} failed"
+        shell: bash
+        env:
+          GUARD: "${{ matrix.guard }}"
+          REASON: "${{ matrix.reason }}"
+          OUTCOME: "${{ steps.guard.outcome }}"
+        run: |
+          set -euo pipefail
+          if [ "${OUTCOME}" = "success" ]; then
+            printf 'ERROR: %s was accepted; %s ❌\n' "${GUARD}" "${REASON}"
+            exit 1
+          fi
+          printf 'Rejected %s (%s) ✅\n' "${GUARD}" "${REASON}"

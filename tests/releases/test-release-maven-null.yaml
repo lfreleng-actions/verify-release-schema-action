@@ -1,0 +1,20 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Regression fixture: schema-valid, but carries an explicit YAML null.
+#
+# An absent field and `ref: null` are different things. The first is
+# legitimate and yields an empty output; the second is a value present
+# in the file that is not a string, and belongs with the other type
+# rejections.
+#
+# Without this fixture, replacing the extractor's MISSING sentinel
+# with a plain .get() would pass every other guard while silently
+# publishing null as an empty output.
+
+distribution_type: "maven"
+log_dir: "test-job/47"
+project: "test-project"
+version: "6.0.0"
+ref: null
