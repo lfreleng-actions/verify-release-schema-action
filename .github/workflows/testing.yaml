@@ -72,7 +72,7 @@ jobs:
       # distribution-type so we get coverage across supported schemas.
       # ----------------------------------------------------------------
       - name: "Verify ${{ matrix.distribution }} release (success)"
-        uses: ./
+        uses: $/
         with:
           distribution-type: "${{ matrix.distribution }}"
           release-file: "${{ matrix.fixture }}"
@@ -117,7 +117,7 @@ jobs:
       - name: "Unsupported distribution-type (should fail)"
         id: unsupported
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           distribution-type: "unsupported-type"
           release-file: "tests/releases/test-release-maven.yaml"
@@ -138,7 +138,7 @@ jobs:
       - name: "Invalid release file (should fail)"
         id: invalid
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           distribution-type: "maven"
           release-file: "tests/releases/test-release-invalid.yaml"
@@ -159,7 +159,7 @@ jobs:
       - name: "Missing release file (should fail)"
         id: missing
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           distribution-type: "maven"
           release-file: "tests/releases/does-not-exist.yaml"
