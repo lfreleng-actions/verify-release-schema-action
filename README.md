@@ -25,10 +25,9 @@ steps:
   - name: "Verify Release Schema"
     id: verify-schema
     # Pin to a commit SHA for supply-chain hardening and
-    # reproducible runs. The outputs below first shipped in v1.0.0:
-    # REPLACE the placeholder with the commit SHA of v1.0.0 or later.
-    # An older SHA validates, but leaves every output empty.
-    uses: lfreleng-actions/verify-release-schema-action@0000000000000000000000000000000000000000  # REPLACE: v1.0.0 or later
+    # reproducible runs. The outputs below first shipped in v1.0.0;
+    # an older SHA validates, but leaves every output empty.
+    uses: lfreleng-actions/verify-release-schema-action@3b161d7a67c5fea35676c76c71f3b2c25a8ee399  # v1.0.0
     with:
       distribution-type: "maven"
       release-file: "releases/release.yaml"
