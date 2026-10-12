@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+#
+# Release file schema for npm packages (distribution-type: npm).
+#
+# Written for this action rather than imported, so it carries the
+# repository's own licence; schemas/README.md explains the split.
+#
+# A release file names the version a merge publishes. Only 'version'
+# is required, so the minimal files already in use stay valid:
+#
+#   project: onap-ui-common
+#   version: 1.1.2
+#
+# The optional fields match the other release schemas, so the
+# action's outputs mean the same thing for every distribution type.
+# Additional properties stay allowed, as in those schemas.
+---
+$schema: "http://json-schema.org/draft-04/schema#"
+# yamllint disable-line rule:line-length
+$id: "https://github.com/lfreleng-actions/verify-release-schema-action/blob/main/schemas/release-npm-schema.yaml"
+
+type: "object"
+
+required:
+  - "version"
+
+properties:
+  distribution_type:
+    type: "string"
+    enum:
+      - "npm"
+  project:
+    type: "string"
+  version:
+    # A full semantic version, as npm publishes it: MAJOR.MINOR.PATCH
+    # with an optional prerelease and build. Rejects '1.1', which YAML
+    # would also read as a number, and the leading zeros SemVer 2.0.0
+    # forbids in a numeric core part or prerelease identifier
+    # ('1.01.0', '1.0.0-alpha.01'). Build metadata may carry them.
+    # This is semver.org's own grammar. The closing '(?!\n)' matters:
+    # the validator matches with Python's re, where '$' also matches
+    # just before a trailing newline, so a block scalar ('version: |')
+    # holding '1.2.3\n' would otherwise pass. ECMA-262 regexes read the
+    # same pattern identically.
+    type: "string"
+    # yamllint disable-line rule:line-length
+    pattern: "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$(?!\\n)"
+  git_tag:
+    type: "string"
+  tag_release:
+    type: "boolean"
+  ref:
+    type: "string"

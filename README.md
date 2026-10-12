@@ -55,7 +55,7 @@ steps:
 
 | Name               | Required | Default                                   | Description                                                                                                                                                                       |
 | ------------------ | -------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| distribution-type  | True     |                                           | Release content type. Accepted values (lowercase, case-sensitive): `artifact`, `container`, `maven`, `packagecloud`, `pypi`                                                       |
+| distribution-type  | True     |                                           | Release content type. Accepted values (lowercase, case-sensitive): `artifact`, `container`, `maven`, `npm`, `packagecloud`, `pypi`                                                |
 | release-file       | True     |                                           | Path to the release file describing the release contents                                                                                                                          |
 | lftools-uv-version | False    | _(empty — latest from PyPI)_              | Optional exact `lftools-uv` version to run via `uvx` (interpolated into `lftools-uv==<value>`, not a full pip specifier). Leave unset to use the latest version published on PyPI |
 | schema-ref         | False    | _(empty)_                                 | **Deprecated and ignored.** The action validates against its bundled schemas; setting this emits a warning and nothing else                                                       |
@@ -177,14 +177,20 @@ provides its own managed Python toolchain.
   - `artifact` — `release-artifact-schema.yaml`
   - `container` — `release-container-schema.yaml`
   - `maven` — `release-schema.yaml`
+  - `npm` — `release-npm-schema.yaml`
   - `packagecloud` — `release-packagecloud-schema.yaml`
   - `pypi` — `release-pypi-schema.yaml`
-- The bundled schemas came unedited from
+- The imported schemas came unedited from
   [lfit/releng-global-jjb](https://github.com/lfit/releng-global-jjb),
   where they're licensed EPL-1.0; they keep that licence.
   [`schemas/README.md`](schemas/README.md) records the source commit
   and how to change a schema, and the test workflow checks each
   imported file against its recorded digest.
+- The `npm` schema originates in this repository (Apache-2.0). Its one
+  required field is `version`, a full semantic version such as `1.1.2`
+  or `2.0.0-rc.1`, so a file holding a `project` and a `version` is
+  valid. `distribution_type`, when present, must be `npm`; `git_tag`,
+  `tag_release` and `ref` are optional.
 - The `schema verify` sub-command in `lftools-uv` is a direct port of
   the original `lftools schema verify` implementation (same
   `jsonschema.Draft4Validator` semantics), so validation results match

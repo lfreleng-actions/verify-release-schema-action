@@ -9,7 +9,7 @@ inputs:
   distribution-type:
     description: >
       The content type of the release. Accepted values (case-sensitive,
-      lowercase): artifact, container, maven, packagecloud, pypi.
+      lowercase): artifact, container, maven, npm, packagecloud, pypi.
     required: true
   release-file:
     description: "File that describes the release contents"
@@ -110,6 +110,9 @@ runs:
           maven)
             release_schema="release-schema.yaml"
             ;;
+          npm)
+            release_schema="release-npm-schema.yaml"
+            ;;
           packagecloud)
             release_schema="release-packagecloud-schema.yaml"
             ;;
@@ -118,7 +121,8 @@ runs:
             ;;
           *)
             echo "ERROR: unsupported distribution-type: ${DISTRIBUTION_TYPE}"
-            echo "Supported: artifact, container, maven, packagecloud, pypi"
+            echo "Supported: artifact, container, maven, npm," \
+              "packagecloud, pypi"
             exit 1
             ;;
         esac

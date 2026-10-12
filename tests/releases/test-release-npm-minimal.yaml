@@ -1,0 +1,10 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Minimal valid npm release fixture, in the shape real ONAP release
+# files take (onap/sdc-onap-ui-common releases/1.1.2.yaml): a project
+# and a version, nothing else. Unquoted, as those files write it.
+
+project: onap-ui-common
+version: 1.1.2

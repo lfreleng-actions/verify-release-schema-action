@@ -116,6 +116,27 @@ jobs:
             want_log_dir: "test-job/42"
             want_ref: ""
             want_tag_release: "true"
+          # The shape real ONAP npm release files take: a project and
+          # an unquoted version, nothing else.
+          - distribution: "npm"
+            fixture: "tests/releases/test-release-npm-minimal.yaml"
+            want_distribution_type: ""
+            want_project: "onap-ui-common"
+            want_version: "1.1.2"
+            want_git_tag: ""
+            want_log_dir: ""
+            want_ref: ""
+            want_tag_release: ""
+          # Every optional field, with a prerelease and build metadata.
+          - distribution: "npm"
+            fixture: "tests/releases/test-release-npm.yaml"
+            want_distribution_type: "npm"
+            want_project: "test-npm-project"
+            want_version: "2.0.0-rc.1+build.01"
+            want_git_tag: "v2.0.0-rc.1"
+            want_log_dir: ""
+            want_ref: "0123456789abcdef0123456789abcdef01234567"
+            want_tag_release: "false"
     steps:
       # Harden the runner used by this workflow
       # yamllint disable-line rule:line-length
@@ -354,6 +375,134 @@ jobs:
           msg="All failure-path assertions passed ✅"
           echo "${msg}"
           echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
+
+  # The npm schema is this repository's own, so its rules are tested
+  # here rather than inherited: each fixture breaks exactly one of
+  # them and must be rejected.
+  npm-rejections:
+    name: "Test npm schema rejections"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: "no version"
+            fixture: "tests/releases/test-release-npm-noversion.yaml"
+          - case: "two-part version"
+            fixture: "tests/releases/test-release-npm-shortversion.yaml"
+          - case: "leading zero"
+            fixture: "tests/releases/test-release-npm-leadingzero.yaml"
+          - case: "zero-padded prerelease"
+            fixture: "tests/releases/test-release-npm-prereleasezero.yaml"
+          - case: "trailing newline"
+            fixture: "tests/releases/test-release-npm-newline.yaml"
+          - case: "another distribution_type"
+            fixture: "tests/releases/test-release-npm-wrongtype.yaml"
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "npm release with ${{ matrix.case }} (should fail)"
+        id: reject
+        continue-on-error: true
+        uses: $/
+        with:
+          distribution-type: "npm"
+          release-file: "${{ matrix.fixture }}"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Assert ${{ matrix.case }} was rejected"
+        shell: bash
+        env:
+          CASE: "${{ matrix.case }}"
+          OUTCOME: "${{ steps.reject.outcome }}"
+        run: |
+          set -euo pipefail
+          if [ "${OUTCOME}" = "success" ]; then
+            printf 'ERROR: npm release with %s was accepted ❌\n' "${CASE}"
+            exit 1
+          fi
+          printf 'Rejected npm release with %s ✅\n' "${CASE}"
+
+  # The npm version pattern, tested as a regular expression against a
+  # table of SemVer 2.0.0 strings, read straight from the schema so the
+  # table always exercises the committed pattern. The fixtures above
+  # prove the action wiring; this covers the grammar's branches, which
+  # one fixture per case could not do economically.
+  npm-version-pattern:
+    name: "Test npm version pattern"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: true
+
+      # Python's re, as the validator (jsonschema's Draft4Validator)
+      # uses, so '$' semantics match what the action enforces.
+      - name: "Check the pattern against SemVer cases"
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --quiet --no-project --with 'pyyaml==6.0.3' python - <<'PYEOF'
+          import re
+          import sys
+
+          import yaml
+
+          with open("schemas/release-npm-schema.yaml", encoding="utf-8") as f:
+              schema = yaml.safe_load(f)
+          pattern = schema["properties"]["version"]["pattern"]
+
+          valid = [
+              "0.0.0", "1.1.2", "10.20.30", "2.0.0-rc.1", "1.0.0-alpha",
+              "1.0.0-alpha.1", "1.0.0-0.3.7", "1.0.0-x.7.z.92",
+              "1.0.0-x-y-z.--", "1.0.0-0A.is.legal", "1.0.0-alpha+001",
+              "1.0.0+20130313144700", "1.0.0+build.01",
+              "1.0.0-beta+exp.sha.5114f85", "1.0.0-rc.1+build.123",
+          ]
+          invalid = [
+              "1.1", "1", "1.01.0", "01.1.0", "1.0.0-01", "1.0.0-alpha.01",
+              "1.0.0-", "1.0.0+", "1.0.0-alpha..1", "1.0.0+build..1",
+              "1.0.0-alpha_beta", "v1.0.0", " 1.0.0", "1.0.0 ",
+              "1.2.3\n", "1.2.3\n\n", "1.2.3\r", "\n1.2.3",
+          ]
+          wrong = [v for v in valid if not re.search(pattern, v)]
+          wrong += [v for v in invalid if re.search(pattern, v)]
+          for value in wrong:
+              print(f"ERROR: pattern misjudges {value!r} \u274c")
+          if wrong:
+              sys.exit(1)
+          print(f"{len(valid)} valid and {len(invalid)} invalid cases \u2705")
+          PYEOF
 
   # Guards that live in extraction rather than the schema. Each fixture
   # is schema-VALID but carries a value the outputs cannot publish

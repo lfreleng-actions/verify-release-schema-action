@@ -1,0 +1,15 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Valid npm release fixture exercising every optional field the
+# schema declares, with a version carrying both a prerelease and build
+# metadata. The build identifier keeps a leading zero, which SemVer
+# allows in build metadata though not in the core or a prerelease.
+
+distribution_type: "npm"
+project: "test-npm-project"
+version: "2.0.0-rc.1+build.01"
+git_tag: "v2.0.0-rc.1"
+tag_release: false
+ref: "0123456789abcdef0123456789abcdef01234567"
