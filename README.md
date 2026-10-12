@@ -58,7 +58,7 @@ steps:
 | distribution-type  | True     |                                           | Release content type. Accepted values (lowercase, case-sensitive): `artifact`, `container`, `maven`, `packagecloud`, `pypi`                                                       |
 | release-file       | True     |                                           | Path to the release file describing the release contents                                                                                                                          |
 | lftools-uv-version | False    | _(empty — latest from PyPI)_              | Optional exact `lftools-uv` version to run via `uvx` (interpolated into `lftools-uv==<value>`, not a full pip specifier). Leave unset to use the latest version published on PyPI |
-| schema-ref         | False    | pinned commit of `lfit/releng-global-jjb` | Git ref (branch, tag or commit SHA) of `lfit/releng-global-jjb` to fetch schemas                                                                                                  |
+| schema-ref         | False    | _(empty)_                                 | **Deprecated and ignored.** The action validates against its bundled schemas; setting this emits a warning and nothing else                                                       |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -145,18 +145,23 @@ naming the field and the type it found. Quoting preserves the value.
 
 - Supplying an unsupported `distribution-type` causes the action to
   fail fast with a non-zero exit code.
-- The action downloads the schema from `lfit/releng-global-jjb` at the
-  ref specified by `schema-ref`. Pin this input to a commit SHA for
-  fully deterministic validation.
+- The action validates against the schemas bundled in its `schemas/`
+  directory, so pinning the action's commit SHA also pins the schema
+  revision. The schema files are no longer fetched from any other
+  repository; the action still installs `uv` and `lftools-uv` (see
+  Requirements).
+- Deprecated: `schema-ref`, which used to select the
+  `lfit/releng-global-jjb` revision to download. The action now
+  ignores it, with a warning, so existing callers keep working.
 - Schema validation delegates to `lftools-uv schema verify` (run via
   `uvx` in an isolated, cached environment); a non-zero exit code from
   `lftools-uv` propagates to the action step.
 
 ## Requirements/Dependencies
 
-`curl` must be available on the runner, along with a bash/Linux-like
-shell environment. The action installs [uv](https://docs.astral.sh/uv/)
-via [astral-sh/setup-uv](https://github.com/astral-sh/setup-uv) and
+The action needs a bash/Linux-like shell environment. It installs
+[uv](https://docs.astral.sh/uv/) via
+[astral-sh/setup-uv](https://github.com/astral-sh/setup-uv) and
 then invokes
 [lftools-uv](https://pypi.org/project/lftools-uv/)
 (the modernised successor to `lftools`) via `uvx` to perform schema
@@ -174,9 +179,12 @@ provides its own managed Python toolchain.
   - `maven` — `release-schema.yaml`
   - `packagecloud` — `release-packagecloud-schema.yaml`
   - `pypi` — `release-pypi-schema.yaml`
-- The action retrieves schema sources from the
-  [lfit/releng-global-jjb](https://github.com/lfit/releng-global-jjb)
-  repository at the ref specified by `schema-ref`.
+- The bundled schemas came unedited from
+  [lfit/releng-global-jjb](https://github.com/lfit/releng-global-jjb),
+  where they're licensed EPL-1.0; they keep that licence.
+  [`schemas/README.md`](schemas/README.md) records the source commit
+  and how to change a schema, and the test workflow checks each
+  imported file against its recorded digest.
 - The `schema verify` sub-command in `lftools-uv` is a direct port of
   the original `lftools schema verify` implementation (same
   `jsonschema.Draft4Validator` semantics), so validation results match

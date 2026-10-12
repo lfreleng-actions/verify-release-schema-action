@@ -4,6 +4,17 @@
 
 extends: default
 
+# Schemas imported unedited from lfit/releng-global-jjb (see
+# schemas/README.md). Reformatting them would break their recorded
+# digests and their comparability with the source, so they are linted
+# where they were written, not here.
+ignore: |
+  schemas/release-artifact-schema.yaml
+  schemas/release-container-schema.yaml
+  schemas/release-packagecloud-schema.yaml
+  schemas/release-pypi-schema.yaml
+  schemas/release-schema.yaml
+
 rules:
   empty-lines:
     max-end: 1
