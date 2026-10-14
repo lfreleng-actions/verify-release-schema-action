@@ -25,13 +25,13 @@ inputs:
     default: ""
   schema-ref:
     description: >
-      Git ref (branch, tag or commit SHA) of lfit/releng-global-jjb to
-      fetch the schema from. Defaults to a pinned commit for reproducibility.
+      DEPRECATED and ignored. Schemas used to be downloaded from
+      lfit/releng-global-jjb at this ref; the action now validates
+      against the schemas bundled in its own schemas/ directory, so the
+      action's own pinned version fixes the schema revision. Setting
+      it only emits a deprecation warning.
     required: false
-    # Pinned to the latest commit touching the `schema/` directory at the
-    # time of writing to give deterministic validation results. Override
-    # via input when a newer schema revision is required.
-    default: "09659ce65d005b15595a44bbef6304fd3cc83ac1"
+    default: ""
 
 # Scalar fields common to the release schemas. Without these a consumer
 # re-parses the release file itself, duplicating the YAML handling this
@@ -125,38 +125,36 @@ runs:
         echo "INFO: Schema to compare: ${release_schema}"
         echo "use_schema=${release_schema}" >> "$GITHUB_OUTPUT"
 
-    - name: "Download and compare schema"
-      id: download-and-compare-schema
+    - name: "Validate against the bundled schema"
+      id: validate-schema
       shell: bash
       env:
         USE_SCHEMA: "${{ steps.set-release-schema.outputs.use_schema }}"
         RELEASE_FILE: "${{ inputs['release-file'] }}"
         SCHEMA_REF: "${{ inputs['schema-ref'] }}"
         LFTOOLS_UV_VERSION: "${{ inputs['lftools-uv-version'] }}"
+        ACTION_PATH: "${{ github.action_path }}"
       # yamllint disable-line rule:line-length
       run: |
         # Fail fast on any command error, undefined variable, or
-        # failing pipeline stage so a bad curl/uvx invocation cannot
+        # failing pipeline stage so a bad uvx invocation cannot
         # silently fall through to a later step.
         set -euo pipefail
 
-        # Fetch the schema from lfit/releng-global-jjb at the pinned
-        # ref. Use curl (present on all GitHub-hosted runners) so we
-        # don't rely on wget being installed. Download into a unique
-        # directory under ${RUNNER_TEMP} (falling back to $(mktemp -d)
-        # when the variable is not set) so we never write into the
-        # consumer's workspace, never clobber a same-named file that
-        # may already exist there, and leave no residue behind.
-        schema_base="https://raw.githubusercontent.com/lfit/releng-global-jjb"
-        schema_url="${schema_base}/${SCHEMA_REF}/schema/${USE_SCHEMA}"
-        runner_tmp="${RUNNER_TEMP:-$(mktemp -d)}"
-        schema_dir="$(mktemp -d -p "${runner_tmp}" vrs.XXXXXX)"
-        trap 'rm -rf "${schema_dir}"' EXIT
-        schema_path="${schema_dir}/${USE_SCHEMA}"
-        tmp_schema="${schema_path}.part"
-        echo "INFO: Fetching schema from ${schema_url}"
-        curl -sSfL -o "${tmp_schema}" "${schema_url}"
-        mv "${tmp_schema}" "${schema_path}"
+        # The schemas ship with the action (schemas/), so the action's
+        # own pinned SHA fixes the schema revision and no schema file
+        # is fetched from another repository. (uv and lftools-uv still
+        # come from their usual sources.) See schemas/README.md for
+        # where each file came from.
+        if [ -n "${SCHEMA_REF}" ]; then
+          echo "::warning::schema-ref is deprecated and ignored; the" \
+            "action validates against its bundled schemas"
+        fi
+        schema_path="${ACTION_PATH}/schemas/${USE_SCHEMA}"
+        if [ ! -f "${schema_path}" ]; then
+          echo "ERROR: bundled schema missing: schemas/${USE_SCHEMA}"
+          exit 1
+        fi
 
         echo "INFO: Verifying ${RELEASE_FILE} against schema ${USE_SCHEMA}"
         # Run lftools-uv via uvx; uvx creates an isolated, cached
@@ -298,11 +296,11 @@ runs:
         # without it, extraction could fail on the caller's unrelated
         # dependency constraints, or mutate their environment.
         #
-        # PyYAML is pinned, matching how this action pins schema-ref and
-        # lets callers pin lftools-uv-version. An unconstrained spec
+        # PyYAML is pinned, matching how this action bundles its schemas
+        # and lets callers pin lftools-uv-version. An unconstrained spec
         # would resolve the latest release on every invocation, so a
-        # caller who had pinned the action SHA, the schema ref and the
-        # lftools-uv version still could not reproduce a run, and an
+        # caller who had pinned the action SHA (and with it the schemas)
+        # and the lftools-uv version still could not reproduce a run, and an
         # upstream release or yank could break the action with no change
         # here. Deliberately not a caller input: PyYAML is an internal
         # implementation detail, and only safe_load is used, which has

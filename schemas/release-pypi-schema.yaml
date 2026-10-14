@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: EPL-1.0
+##############################################################################
+# Copyright (c) 2019 The Linux Foundation and others.
+#
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Eclipse Public License v1.0
+# which accompanies this distribution, and is available at
+# http://www.eclipse.org/legal/epl-v10.html
+##############################################################################
+---
+$schema: "http://json-schema.org/schema#"
+$id: "https://github.com/lfit/releng-global-jjb/blob/master/release-pypi-schema.yaml"
+
+required:
+  - "log_dir"
+  - "pypi_project"
+  - "python_version"
+  - "version"
+
+properties:
+  git_tag:
+    type: "string"
+  log_dir:
+    type: "string"
+  pypi_project:
+    type: "string"
+  python_version:
+    type: "string"
+  tag_release:
+    type: "boolean"
+  version:
+    type: "string"

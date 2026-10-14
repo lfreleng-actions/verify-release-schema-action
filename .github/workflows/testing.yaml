@@ -30,13 +30,6 @@ permissions: {}
 # action still get latest by default (see the action's input contract).
 env:
   LFTOOLS_UV_VERSION: "0.1.8"
-  # Pin the schema revision for the same reason, and pass it to every
-  # invocation below rather than leaning on the action's own default.
-  # The non-scalar regression test validates its fixture separately
-  # before invoking the action; were the two to resolve different
-  # schema revisions, the precheck could pass while the action failed
-  # validation, and that test would then pass on the wrong failure.
-  SCHEMA_REF: "09659ce65d005b15595a44bbef6304fd3cc83ac1"
 
 jobs:
   ### Test the GitHub Action in this Repository ###
@@ -148,7 +141,6 @@ jobs:
           distribution-type: "${{ matrix.distribution }}"
           release-file: "${{ matrix.fixture }}"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
-          schema-ref: "${{ env.SCHEMA_REF }}"
 
       # Assert every declared output against the fixture's expected
       # value. All seven are checked on every fixture, including the
@@ -215,6 +207,47 @@ jobs:
           echo "${msg}"
           echo "- ${msg}" >> "$GITHUB_STEP_SUMMARY"
 
+  # The bundled schemas imported from lfit/releng-global-jjb must stay
+  # byte-identical to the revision schemas/README.md records, so a
+  # change to one is a deliberate update of the digest rather than an
+  # unnoticed edit. The check reads the digests committed here, so it
+  # never fetches a schema from upstream to compare against.
+  schema-integrity:
+    name: "Verify bundled schema digests"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Check imported schemas against recorded digests"
+        shell: bash
+        working-directory: schemas
+        run: |
+          set -euo pipefail
+          sha256sum --check --strict global-jjb.sha256
+          # Every imported schema the action maps a type to must be
+          # covered, so a file added without a digest fails here.
+          for schema in release-*-schema.yaml release-schema.yaml; do
+            if ! grep -q " ${schema}\$" global-jjb.sha256 \
+              && grep -q 'releng-global-jjb' "${schema}"; then
+              echo "ERROR: ${schema} is imported but has no digest ❌"
+              exit 1
+            fi
+          done
+          echo "Bundled schemas match their recorded digests ✅"
+
   # Dedicated job for failure-path testing so matrix parallelism doesn't
   # hide regressions specific to a single negative case.
   failure-tests:
@@ -249,7 +282,6 @@ jobs:
           distribution-type: "unsupported-type"
           release-file: "tests/releases/test-release-maven.yaml"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
-          schema-ref: "${{ env.SCHEMA_REF }}"
 
       - name: "Assert unsupported distribution-type failed"
         if: steps.unsupported.outcome == 'success'
@@ -271,7 +303,6 @@ jobs:
           distribution-type: "maven"
           release-file: "tests/releases/test-release-invalid.yaml"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
-          schema-ref: "${{ env.SCHEMA_REF }}"
 
       - name: "Assert invalid release file failed"
         if: steps.invalid.outcome == 'success'
@@ -293,7 +324,6 @@ jobs:
           distribution-type: "maven"
           release-file: "tests/releases/does-not-exist.yaml"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
-          schema-ref: "${{ env.SCHEMA_REF }}"
 
       - name: "Assert missing release file failed"
         if: steps.missing.outcome == 'success'
@@ -302,6 +332,19 @@ jobs:
           # A missing release file must not silently succeed
           echo "ERROR: missing release file did NOT fail ❌"
           exit 1
+
+      # ----------------------------------------------------------------
+      # schema-ref is deprecated: a caller still passing it must keep
+      # working (the value is ignored, with a warning), so removing the
+      # input never breaks a pinned consumer.
+      # ----------------------------------------------------------------
+      - name: "Deprecated schema-ref is ignored (should pass)"
+        uses: $/
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/test-release-maven.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+          schema-ref: "09659ce65d005b15595a44bbef6304fd3cc83ac1"
 
       # ----------------------------------------------------------------
       - name: "All failure-path assertions passed"
@@ -369,20 +412,17 @@ jobs:
       # anything. Were the schema to reject it, the action would fail
       # for that reason and the test would pass without ever reaching
       # the guard. No continue-on-error here, so that regression is
-      # loud rather than silent. Uses the same pinned schema revision
-      # the action invocation below receives.
+      # loud rather than silent. Uses the bundled schema the action
+      # invocation below validates against, so the two cannot disagree.
       - name: "Confirm ${{ matrix.guard }} fixture is schema-valid"
         shell: bash
         env:
           FIXTURE: "${{ matrix.fixture }}"
         run: |
           set -euo pipefail
-          base="https://raw.githubusercontent.com/lfit/releng-global-jjb"
-          schema="${RUNNER_TEMP}/release-schema.yaml"
-          curl -sSfL -o "${schema}" \
-            "${base}/${SCHEMA_REF}/schema/release-schema.yaml"
           uvx --from "lftools-uv==${LFTOOLS_UV_VERSION}" \
-            lftools-uv schema verify "${FIXTURE}" "${schema}"
+            lftools-uv schema verify "${FIXTURE}" \
+            schemas/release-schema.yaml
           echo "Schema-valid, so only extraction can reject it ✅"
 
       - name: "${{ matrix.guard }} (should fail)"
@@ -393,7 +433,6 @@ jobs:
           distribution-type: "maven"
           release-file: "${{ matrix.fixture }}"
           lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
-          schema-ref: "${{ env.SCHEMA_REF }}"
 
       - name: "Assert ${{ matrix.guard }} failed"
         shell: bash
