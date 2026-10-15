@@ -1,0 +1,10 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Invalid npm release fixture: a distribution_type naming another
+# content type, which an npm release file must not carry.
+
+distribution_type: "maven"
+project: "test-npm-project"
+version: "1.0.0"

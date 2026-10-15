@@ -1,0 +1,11 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Invalid npm release fixture: a block scalar, so the version carries a
+# trailing newline ('1.2.3\n'). Python's '$' matches before a final
+# newline, so the schema's pattern has to rule it out explicitly.
+
+project: "test-npm-project"
+version: |
+  1.2.3

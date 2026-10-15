@@ -1,0 +1,9 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Invalid npm release fixture: a leading zero, which semantic
+# versioning and npm both refuse.
+
+project: "test-npm-project"
+version: "1.01.0"

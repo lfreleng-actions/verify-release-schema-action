@@ -13,6 +13,10 @@ outside the `lfreleng-actions` organisation. The action's tooling
 
 ## Provenance
 
+Two kinds of schema live here.
+
+### Imported
+
 These files come byte-for-byte from
 [`lfit/releng-global-jjb`](https://github.com/lfit/releng-global-jjb),
 directory `schema/`, at commit
@@ -35,6 +39,20 @@ They keep their original EPL-1.0 licence and copyright headers
 (`LICENSES/EPL-1.0.txt`). Leave them unedited, so they stay
 comparable with their source. `global-jjb.sha256` records their
 digests, and the test workflow fails if a file no longer matches.
+
+### Written here
+
+<!-- markdownlint-disable MD013 -->
+
+| File                      | `distribution-type` |
+| ------------------------- | ------------------- |
+| `release-npm-schema.yaml` | `npm`               |
+
+<!-- markdownlint-enable MD013 -->
+
+These originate in this repository, under its Apache-2.0 licence,
+and change through ordinary pull requests with fixtures for each
+rule.
 
 ## Changing a schema
 
