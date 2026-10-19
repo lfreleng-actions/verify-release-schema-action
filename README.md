@@ -26,8 +26,10 @@ steps:
     id: verify-schema
     # Pin to a commit SHA for supply-chain hardening and
     # reproducible runs. The outputs below first shipped in v1.0.0;
-    # an older SHA validates, but leaves every output empty.
-    uses: lfreleng-actions/verify-release-schema-action@3b161d7a67c5fea35676c76c71f3b2c25a8ee399  # v1.0.0
+    # an older SHA validates, but leaves every output empty. The
+    # schemas ship with the action from v1.1.0; an earlier SHA
+    # still fetches them from lfit/releng-global-jjb at run time.
+    uses: lfreleng-actions/verify-release-schema-action@<sha>  # vX.Y.Z
     with:
       distribution-type: "maven"
       release-file: "releases/release.yaml"
@@ -186,6 +188,19 @@ provides its own managed Python toolchain.
   [`schemas/README.md`](schemas/README.md) records the source commit
   and how to change a schema, and the test workflow checks each
   imported file against its recorded digest.
+- The imported container schema checks that `containers` is an
+  array, but not any entry inside it. It places `properties` and
+  `additionalProperties: false` directly on `containers`, and JSON
+  Schema Draft 4 ignores those keywords on any instance that is not
+  an object, so they never reach the entries. The action accepts an
+  entry such as `name: 'Bad Name!'`, an entry with extra keys, or a
+  bare `42`.
+  The imported file stays unedited, per
+  [`schemas/README.md`](schemas/README.md).
+  [`lfreleng-actions/docker-release-detect-action`](https://github.com/lfreleng-actions/docker-release-detect-action)
+  applies Docker's name and tag grammar to each entry; its section
+  [The release container schema](https://github.com/lfreleng-actions/docker-release-detect-action#the-release-container-schema)
+  compares the two validators field by field.
 - The `npm` schema originates in this repository (Apache-2.0). Its one
   required field is `version`, a full semantic version such as `1.1.2`
   or `2.0.0-rc.1`, so a file holding a `project` and a `version` is
