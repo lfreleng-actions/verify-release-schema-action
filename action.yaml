@@ -89,9 +89,14 @@ runs:
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
       with:
-        # Enable uv's built-in cache between runs to speed up repeated
-        # invocations in CI.
-        enable-cache: true
+        # GitHub Actions caching stays off. A restored cache feeds the
+        # environment that validates the release file and extracts the
+        # outputs gating a release, and a cache written by a
+        # less-trusted run in the same scope would be trusted on
+        # restore (cache poisoning, CWE-349). setup-uv's default,
+        # 'auto', caches on push events, so only an explicit false
+        # disables it. A cold install costs seconds per run.
+        enable-cache: false
 
     - name: "Set release schema"
       id: set-release-schema
