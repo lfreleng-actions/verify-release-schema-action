@@ -158,6 +158,16 @@ naming the field and the type it found. Quoting preserves the value.
 - Schema validation delegates to `lftools-uv schema verify` (run via
   `uvx` in an isolated, cached environment); a non-zero exit code from
   `lftools-uv` propagates to the action step.
+- The action sets `enable-cache: false` on `astral-sh/setup-uv`, so a
+  run neither restores nor saves a GitHub Actions cache, and no input
+  turns caching back on. A restored cache would feed the environment
+  that validates the release file and produces the outputs gating a
+  release, so a cache written by a less-trusted run in the same scope
+  could change the result (cache poisoning, CWE-349). A cold install
+  of `lftools-uv` costs seconds. The setting leaves `uv`'s local cache
+  directory on the runner alone, which lasts for the job. The test
+  workflow fails if any `setup-uv` step in the repository omits the
+  setting.
 
 ## Requirements/Dependencies
 

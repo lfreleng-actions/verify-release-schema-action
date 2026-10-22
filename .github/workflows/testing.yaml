@@ -269,6 +269,100 @@ jobs:
           done
           echo "Bundled schemas match their recorded digests ✅"
 
+  # A restored GitHub Actions cache would feed the environment that
+  # validates release files, so a cache written by a less-trusted run
+  # could change the result (CWE-349). setup-uv's default, 'auto',
+  # caches on push events, so every setup-uv step here must set
+  # enable-cache to false explicitly; this keeps one from coming back.
+  setup-uv-cache:
+    name: "Assert every setup-uv step disables caching"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: false
+
+      # Parsed as YAML rather than grepped, so a setting in a comment,
+      # in another step or under another key cannot satisfy the check.
+      - name: "Check setup-uv steps in the action and workflows"
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --quiet --no-project --with 'pyyaml==6.0.3' python - <<'PYEOF'
+          import glob
+          import sys
+
+          import yaml
+
+          paths = ["action.yaml"] + sorted(
+              glob.glob(".github/workflows/*.yaml")
+              + glob.glob(".github/workflows/*.yml")
+          )
+
+          def steps_of(document):
+              if not isinstance(document, dict):
+                  return
+              runs = document.get("runs")
+              if isinstance(runs, dict):
+                  for step in runs.get("steps") or []:
+                      yield "runs", step
+              jobs = document.get("jobs")
+              if isinstance(jobs, dict):
+                  for job_id, job in jobs.items():
+                      if isinstance(job, dict):
+                          for step in job.get("steps") or []:
+                              yield f"jobs.{job_id}", step
+
+          failures = []
+          checked = 0
+          for path in paths:
+              with open(path, encoding="utf-8") as handle:
+                  document = yaml.safe_load(handle)
+              for where, step in steps_of(document):
+                  if not isinstance(step, dict):
+                      continue
+                  uses = str(step.get("uses", ""))
+                  if uses.split("@", 1)[0] != "astral-sh/setup-uv":
+                      continue
+                  checked += 1
+                  name = f"{where}: '{step.get('name') or uses}'"
+                  settings = step.get("with") or {}
+                  missing = object()
+                  value = settings.get("enable-cache", missing)
+                  if value is missing:
+                      failures.append(f"{path}: {name} omits enable-cache")
+                  elif value is not False and value != "false":
+                      failures.append(
+                          f"{path}: {name} sets enable-cache: {value!r}"
+                      )
+
+          for failure in failures:
+              print(f"ERROR: {failure} \u274c")
+          if checked == 0:
+              print("ERROR: no setup-uv steps found to check \u274c")
+              sys.exit(1)
+          if failures:
+              sys.exit(1)
+          print(f"{checked} setup-uv steps disable caching \u2705")
+          PYEOF
+
   # Dedicated job for failure-path testing so matrix parallelism doesn't
   # hide regressions specific to a single negative case.
   failure-tests:
@@ -464,7 +558,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
-          enable-cache: true
+          enable-cache: false
 
       # Python's re, as the validator (jsonschema's Draft4Validator)
       # uses, so '$' semantics match what the action enforces.
@@ -555,7 +649,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
         with:
-          enable-cache: true
+          enable-cache: false
 
       # The fixture MUST validate for the assertion below to mean
       # anything. Were the schema to reject it, the action would fail
