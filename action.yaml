@@ -88,7 +88,25 @@ runs:
       id: install-uv
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
+      # setup-uv runs 'uv python find' in its working-directory to
+      # report a Python version, then executes the interpreter found.
+      # That lookup searches the directory and its parents for a .venv
+      # and, without UV_NO_CONFIG, reads a .python-version. Pointing
+      # working-directory at the action's own directory, outside the
+      # caller's workspace, means neither is searched there; the input
+      # exports nothing to later steps. UV_SYSTEM_PYTHON makes the
+      # lookup skip virtual environments, including a workspace .venv
+      # above an action checked out inside the workspace ('uses: ./').
+      # Both variables apply to this step only, so the caller's later
+      # steps are unaffected.
+      env:
+        UV_NO_CONFIG: "1"
+        UV_SYSTEM_PYTHON: "1"
       with:
+        # Also where setup-uv looks for a required-version (uv.toml,
+        # then pyproject.toml), as no version input is set here. The
+        # action ships neither file, so the latest uv is installed.
+        working-directory: "${{ github.action_path }}"
         # GitHub Actions caching stays off. A restored cache feeds the
         # environment that validates the release file and extracts the
         # outputs gating a release, and a cache written by a
@@ -297,6 +315,31 @@ runs:
                 print(f"INFO: {field} {state}")
         PYEOF
 
+        # uv run, even with --no-config, executes a .venv it finds in
+        # the working directory or a parent, so the interpreter is
+        # resolved from the action's own directory (outside the
+        # caller's workspace) and passed by absolute path. --system
+        # skips virtual environments, so a workspace .venv above an
+        # action checked out inside the workspace is not used either.
+        # --no-project stops the lookup applying the requires-python of
+        # a pyproject.toml above such a checkout, which UV_NO_CONFIG
+        # does not; the extraction needs any Python, not the caller's.
+        # 'uv python find' never downloads; when it finds nothing,
+        # install a managed Python as 'uv run' would have, so a runner
+        # without Python still works. With no version given, 'uv python
+        # install' takes uv's default and ignores requires-python.
+        py="$(
+          cd "${GITHUB_ACTION_PATH:?}" || exit 1
+          export UV_NO_CONFIG=1
+          uv python find --system --no-project 2> /dev/null \
+            || { uv python install --quiet >&2 \
+              && uv python find --system --no-project; }
+        )" || py=""
+        if [ -z "${py}" ]; then
+          echo "ERROR: no Python interpreter found or installed for uv"
+          exit 1
+        fi
+
         # uv is already on PATH from the setup step above; --with keeps
         # PyYAML in an isolated environment rather than installing it
         # into whatever Python the runner happens to ship. --no-project
@@ -304,6 +347,11 @@ runs:
         # the caller, whose workspace this composite step runs in:
         # without it, extraction could fail on the caller's unrelated
         # dependency constraints, or mutate their environment.
+        # --no-config stops uv reading the caller's .python-version,
+        # which would choose the interpreter, and a uv.toml there,
+        # which could change the index PyYAML comes from. -I keeps the
+        # working directory and PYTHON* variables out of the
+        # interpreter's import path.
         #
         # PyYAML is pinned, matching how this action bundles its schemas
         # and lets callers pin lftools-uv-version. An unconstrained spec
@@ -314,5 +362,5 @@ runs:
         # here. Deliberately not a caller input: PyYAML is an internal
         # implementation detail, and only safe_load is used, which has
         # been stable across the 6.x series.
-        uv run --quiet --no-project --with 'pyyaml==6.0.3' python \
-            "${work_dir}/extract.py"
+        uv run --quiet --no-config --no-project --python "${py}" \
+            --with 'pyyaml==6.0.3' python -I "${work_dir}/extract.py"
