@@ -305,7 +305,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run --quiet --no-project --with 'pyyaml==6.0.3' python - <<'PYEOF'
+          uv run --quiet --no-config --no-project --with 'pyyaml==6.0.3' \
+            python -I - <<'PYEOF'
           import glob
           import sys
 
@@ -566,7 +567,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          uv run --quiet --no-project --with 'pyyaml==6.0.3' python - <<'PYEOF'
+          uv run --quiet --no-config --no-project --with 'pyyaml==6.0.3' \
+            python -I - <<'PYEOF'
           import re
           import sys
 
@@ -690,3 +692,268 @@ jobs:
             exit 1
           fi
           printf 'Rejected %s (%s) ✅\n' "${GUARD}" "${REASON}"
+
+  # The action runs uv and Python from the caller's workspace. Files
+  # there must not choose the interpreter, the package index or the
+  # modules the extraction imports: each planted file records that it
+  # ran and fails, and the uv.toml points the index at a host that
+  # does not resolve. The action must still pass with real outputs.
+  # The action runs from the workspace here, so the planted .venv is
+  # in its directory, where its own interpreter lookups must skip it,
+  # and so is a pyproject.toml requiring a Python no runner has, which
+  # those lookups must not apply.
+  workspace-isolation:
+    name: "Test the action ignores files in the workspace"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2.22.1
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Plant files in the workspace"
+        shell: bash
+        run: |
+          set -euo pipefail
+          marker="${RUNNER_TEMP}/planted-ran"
+          mkdir -p yaml
+          for module in yaml/__init__.py secrets.py sitecustomize.py; do
+            printf '%s\n' 'import sys' \
+              "open('${marker}', 'a').write(__file__ + '\n')" \
+              'sys.exit(97)' > "${module}"
+          done
+          printf '%s\n' '#!/bin/sh' "echo \"\$0\" >> '${marker}'" \
+            'exit 97' > planted-python
+          chmod +x planted-python
+          mkdir -p .venv/bin
+          echo 'home = /usr/bin' > .venv/pyvenv.cfg
+          for interpreter in .venv/bin/python .venv/bin/python3; do
+            cp planted-python "${interpreter}"
+          done
+          echo "${GITHUB_WORKSPACE}/planted-python" > .python-version
+          printf '%s\n' '[[index]]' \
+            'url = "https://pypi.invalid/simple"' 'default = true' \
+            > uv.toml
+          printf '%s\n' '[project]' 'name = "planted"' 'version = "0"' \
+            'requires-python = ">=3.99"' > pyproject.toml
+          echo "Files planted ✅"
+
+      - name: "Verify maven release with planted files"
+        id: verify
+        uses: $/
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/test-release-maven.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Assert real outputs and no planted file ran"
+        shell: bash
+        env:
+          GOT_DISTRIBUTION_TYPE: "${{ steps.verify.outputs.distribution_type }}"
+          GOT_PROJECT: "${{ steps.verify.outputs.project }}"
+          GOT_VERSION: "${{ steps.verify.outputs.version }}"
+          GOT_TAG_RELEASE: "${{ steps.verify.outputs.tag_release }}"
+        run: |
+          set -euo pipefail
+          rc=0
+          check() {
+            # $1 output name, $2 expected, $3 actual
+            if [ "$2" != "$3" ]; then
+              printf 'ERROR: %s: expected %q, got %q ❌\n' "$1" "$2" "$3"
+              rc=1
+            fi
+          }
+          check distribution_type maven "${GOT_DISTRIBUTION_TYPE}"
+          check project test-project "${GOT_PROJECT}"
+          check version 1.0.0 "${GOT_VERSION}"
+          check tag_release true "${GOT_TAG_RELEASE}"
+          if [ -e "${RUNNER_TEMP}/planted-ran" ]; then
+            echo "ERROR: files planted in the workspace ran ❌"
+            cat "${RUNNER_TEMP}/planted-ran"
+            rc=1
+          fi
+          if [ "${rc}" -eq 0 ]; then
+            echo "Real outputs, and no planted file ran ✅"
+          fi
+          exit "${rc}"
+
+      # extract.py runs from RUNNER_TEMP in script mode, so the run
+      # above cannot tell whether its python has -I. Run the shipped
+      # step script on its own with PYTHONPATH naming planted modules,
+      # where -I is what keeps them out, and run a copy without -I as a
+      # control: unless the control loads them, the check proves
+      # nothing and fails.
+      #
+      # The run above uses the action from the workspace itself, where
+      # the action directory is the workspace and holds the planted
+      # .venv, so only the lookups' --system and UV_SYSTEM_PYTHON keep
+      # it out. Here the step also runs with GITHUB_ACTION_PATH set to
+      # a copy of the action outside the workspace, as for a published
+      # action under _actions/. A copy of the step without --python,
+      # the previous extraction call, is the control that must run the
+      # planted interpreter there; a copy whose lookup lacks --system
+      # must run it with the action in the workspace. A copy whose
+      # lookups lack --no-project must, with the action in the
+      # workspace, apply the planted pyproject.toml's requires-python,
+      # find no interpreter and stop; any Python it installs goes to a
+      # scratch directory, leaving the runner's uv-managed Pythons as
+      # they were.
+      - name: "Extraction ignores PYTHONPATH and a workspace .venv"
+        shell: bash
+        env:
+          RELEASE_FILE: "tests/releases/test-release-maven.yaml"
+        run: |
+          set -euo pipefail
+          planted="${RUNNER_TEMP}/planted-path"
+          marker="${RUNNER_TEMP}/planted-path-ran"
+          venv_marker="${RUNNER_TEMP}/planted-venv-ran"
+          mkdir -p "${planted}/yaml"
+          for module in yaml/__init__.py secrets.py sitecustomize.py; do
+            printf '%s\n' 'import sys' \
+              "open('${marker}', 'a').write(__file__ + '\n')" \
+              'sys.exit(97)' > "${planted}/${module}"
+          done
+          step="${RUNNER_TEMP}/release-fields.sh"
+          # Remove the .venv planted for the action run above and plant
+          # it again further down: this helper runs uv from the
+          # workspace without an absolute --python.
+          rm -rf .venv
+          uv run --quiet --no-config --no-project --with pyyaml==6.0.3 \
+            python -I - action.yaml "${step}" <<'PYEOF'
+          import sys
+          import yaml
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              steps = yaml.safe_load(handle)["runs"]["steps"]
+          script = next(
+              s["run"] for s in steps if s.get("id") == "release-fields"
+          )
+          with open(sys.argv[2], "w", encoding="utf-8") as handle:
+              handle.write(script)
+          PYEOF
+
+          # The extraction call as action.yaml writes it, line by line.
+          cat > "${step}.call" <<'EOF'
+          uv run --quiet --no-config --no-project --python "${py}" \
+              --with 'pyyaml==6.0.3' python -I "${work_dir}/extract.py"
+          EOF
+          while IFS= read -r line; do
+            grep -qxF -- "${line}" "${step}" || {
+              echo "ERROR: the extraction call changed; update this check ❌"
+              exit 1
+            }
+          done < "${step}.call"
+          sed 's/python -I "/python "/' "${step}" > "${step}.control"
+          # The pattern is literal text from action.yaml, not shell.
+          # shellcheck disable=SC2016
+          sed 's/ --python "\${py}"//' "${step}" > "${step}.venv-control"
+          sed 's/uv python find --system/uv python find/' "${step}" \
+            > "${step}.system-control"
+          sed 's/find --system --no-project/find --system/' "${step}" \
+            > "${step}.project-control"
+          for control in "${step}.control" "${step}.venv-control" \
+            "${step}.system-control" "${step}.project-control"; do
+            if cmp -s "${step}" "${control}"; then
+              echo "ERROR: ${control##*/} is not a changed copy ❌"
+              exit 1
+            fi
+          done
+
+          action_copy="${RUNNER_TEMP}/action-copy"
+          mkdir -p "${action_copy}"
+          cp action.yaml "${action_copy}/"
+          mkdir -p .venv/bin
+          echo 'home = /usr/bin' > .venv/pyvenv.cfg
+          for interpreter in .venv/bin/python .venv/bin/python3; do
+            printf '%s\n' '#!/bin/sh' \
+              "echo \"\$0\" >> '${venv_marker}'" 'exit 97' > "${interpreter}"
+            chmod +x "${interpreter}"
+          done
+
+          run_step() {
+            # $1 script, $2 action directory; prints the step's output
+            # and keeps its log in fields-log
+            rm -f "${marker}" "${venv_marker}"
+            : > "${RUNNER_TEMP}/fields-output"
+            GITHUB_OUTPUT="${RUNNER_TEMP}/fields-output" \
+              GITHUB_ACTION_PATH="$2" PYTHONPATH="${planted}" \
+              bash "$1" > "${RUNNER_TEMP}/fields-log" 2>&1 || true
+            cat "${RUNNER_TEMP}/fields-output"
+          }
+          check_shipped() {
+            # $1 output of the shipped step, $2 layout
+            if [ -e "${marker}" ]; then
+              echo "ERROR: the shipped step loaded a planted module" \
+                "($2) ❌"
+              cat "${marker}"
+              exit 1
+            fi
+            if [ -e "${venv_marker}" ]; then
+              echo "ERROR: the shipped step ran the planted .venv ($2) ❌"
+              cat "${venv_marker}"
+              exit 1
+            fi
+            if ! grep -A1 '^project<<' <<< "$1" \
+              | grep -qx 'test-project'; then
+              echo "ERROR: the shipped step did not write project ($2) ❌"
+              printf '%s\n' "$1"
+              exit 1
+            fi
+          }
+
+          run_step "${step}.control" "${action_copy}" > /dev/null
+          if [ ! -e "${marker}" ]; then
+            echo "ERROR: the control without -I loaded no planted module ❌"
+            exit 1
+          fi
+          echo "Control without -I loaded: $(tr '\n' ' ' < "${marker}")"
+
+          run_step "${step}.venv-control" "${action_copy}" > /dev/null
+          if [ ! -e "${venv_marker}" ]; then
+            echo "ERROR: the control without --python ran no planted" \
+              "interpreter ❌"
+            exit 1
+          fi
+          echo "Control without --python ran:" \
+            "$(tr '\n' ' ' < "${venv_marker}")"
+
+          run_step "${step}.system-control" "${GITHUB_WORKSPACE}" \
+            > /dev/null
+          if [ ! -e "${venv_marker}" ]; then
+            echo "ERROR: the control without --system ran no planted" \
+              "interpreter ❌"
+            exit 1
+          fi
+          echo "Control without --system ran:" \
+            "$(tr '\n' ' ' < "${venv_marker}")"
+
+          scratch_python="${RUNNER_TEMP}/project-control-python"
+          project_output="$(
+            UV_PYTHON_INSTALL_DIR="${scratch_python}/install" \
+              UV_PYTHON_BIN_DIR="${scratch_python}/bin" \
+              run_step "${step}.project-control" "${GITHUB_WORKSPACE}"
+          )"
+          rm -rf "${scratch_python}"
+          if [ -n "${project_output}" ] || ! grep -q \
+            'no Python interpreter found' "${RUNNER_TEMP}/fields-log"; then
+            echo "ERROR: the control without --no-project did not stop" \
+              "on the planted requires-python ❌"
+            cat "${RUNNER_TEMP}/fields-log"
+            exit 1
+          fi
+          echo "Control without --no-project found no interpreter"
+
+          check_shipped "$(run_step "${step}" "${action_copy}")" \
+            "action outside the workspace"
+          check_shipped "$(run_step "${step}" "${GITHUB_WORKSPACE}")" \
+            "action in the workspace"
+          echo "Extraction ignores PYTHONPATH and a workspace .venv ✅"
