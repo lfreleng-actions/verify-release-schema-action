@@ -364,6 +364,147 @@ jobs:
           print(f"{checked} setup-uv steps disable caching \u2705")
           PYEOF
 
+  # A composite action inherits the caller job's environment, so a
+  # caller's PATH, UV_PYTHON, VIRTUAL_ENV and similar must not choose
+  # the interpreter the action runs. Pin the setup-uv step's guarded
+  # form, and require every uv call to name the trusted interpreter
+  # (or run under env -i) and every Python start to use -I. The
+  # interpreter-isolation job below tests the behaviour; this keeps a
+  # later edit from dropping a guard that job happens not to reach.
+  interpreter-contract:
+    name: "Assert the action pins its Python interpreter"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: "Check the setup-uv step and every uv and Python start"
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --quiet --no-config --no-project --with 'pyyaml==6.0.3' \
+            python -I - <<'PYEOF'
+          import re
+          import sys
+
+          import yaml
+
+          with open("action.yaml", encoding="utf-8") as handle:
+              steps = yaml.safe_load(handle)["runs"]["steps"]
+
+          failures = []
+          setup = [
+              step for step in steps
+              if str(step.get("uses", "")).split("@", 1)[0]
+              == "astral-sh/setup-uv"
+          ]
+          def expr(text):
+              # Split so the runner does not expand it in this script
+              return "$" + "{{ " + text + " }}"
+
+          temp = expr("runner.temp") + "/verify-release-schema"
+          want_with = {
+              "working-directory": expr("github.action_path"),
+              "tool-bin-dir": f"{temp}/bin",
+              "enable-cache": False,
+          }
+          want_env = {
+              "UV_NO_CONFIG": "1",
+              "UV_NO_PROJECT": "1",
+              "UV_PYTHON_PREFERENCE": "lookup-disabled",
+              "UV_PYTHON_ARCH": "",
+              "UV_PYTHON_INSTALL_DIR": f"{temp}/python",
+          }
+          if len(setup) != 1:
+              failures.append(f"expected one setup-uv step, found {len(setup)}")
+          for step in setup:
+              if step.get("id") != "setup-uv":
+                  failures.append("the setup-uv step's id is not setup-uv")
+              if step.get("with") != want_with:
+                  failures.append(f"setup-uv with: {step.get('with')!r}")
+              if step.get("env") != want_env:
+                  failures.append(f"setup-uv env: {step.get('env')!r}")
+
+          uv_call = re.compile(
+              r'(?:^|[\s;&|(])("\$\{?UV\}?"|uvx|uv(?=\s+(?:run|tool|pip'
+              r'|venv|sync|export|python)\b))\s+(\S+)'
+          )
+          python_start = re.compile(
+              r'(?:^|[\s;&|(])python3?\s+(?!find\b|install\b)(\S+)'
+          )
+          uv_calls = 0
+          python_starts = 0
+          for step in steps:
+              script = step.get("run")
+              if not script:
+                  continue
+              name = step.get("name")
+              # Join continued lines, so each command reads as one line
+              for line in re.sub(r"\\\n\s*", " ", script).splitlines():
+                  if line.lstrip().startswith("#"):
+                      continue
+                  for match in uv_call.finditer(line):
+                      uv_calls += 1
+                      if match.group(1) not in ('"${UV}"', '"$UV"'):
+                          failures.append(f"{name}: uv not via uv-path: {line}")
+                      elif match.group(2) == "python":
+                          if "env -i " not in line:
+                              failures.append(
+                                  f"{name}: uv python outside env -i: {line}"
+                              )
+                      elif '--python "${INTERPRETER}"' not in line:
+                          failures.append(
+                              f"{name}: uv without the trusted --python: {line}"
+                          )
+                  for match in python_start.finditer(line):
+                      python_starts += 1
+                      if match.group(1) != "-I":
+                          failures.append(f"{name}: python without -I: {line}")
+
+          for forbidden in ("--system", "--managed-python"):
+              for step in steps:
+                  script = step.get("run") or ""
+                  for line in script.splitlines():
+                      if line.lstrip().startswith("#") or forbidden not in line:
+                          continue
+                      if forbidden == "--managed-python" and "env -i " in line:
+                          continue
+                      failures.append(f"{step['name']}: {forbidden}: {line}")
+
+          for failure in failures:
+              print(f"ERROR: {failure} \u274c")
+          if uv_calls < 4 or python_starts < 2:
+              print(
+                  f"ERROR: found {uv_calls} uv calls and {python_starts}"
+                  " Python starts; the check no longer sees them \u274c"
+              )
+              sys.exit(1)
+          if failures:
+              sys.exit(1)
+          print(
+              f"setup-uv pinned; {uv_calls} uv calls and {python_starts}"
+              " Python starts use the trusted interpreter \u2705"
+          )
+          PYEOF
+
   # Dedicated job for failure-path testing so matrix parallelism doesn't
   # hide regressions specific to a single negative case.
   failure-tests:
@@ -790,24 +931,14 @@ jobs:
       # extract.py runs from RUNNER_TEMP in script mode, so the run
       # above cannot tell whether its python has -I. Run the shipped
       # step script on its own with PYTHONPATH naming planted modules,
-      # where -I is what keeps them out, and run a copy without -I as a
-      # control: unless the control loads them, the check proves
-      # nothing and fails.
+      # where -I and the step's own unsetting of PYTHON* variables keep
+      # them out, and run a copy with neither as a control: unless the
+      # control loads them, the check proves nothing and fails.
       #
-      # The run above uses the action from the workspace itself, where
-      # the action directory is the workspace and holds the planted
-      # .venv, so only the lookups' --system and UV_SYSTEM_PYTHON keep
-      # it out. Here the step also runs with GITHUB_ACTION_PATH set to
-      # a copy of the action outside the workspace, as for a published
-      # action under _actions/. A copy of the step without --python,
-      # the previous extraction call, is the control that must run the
-      # planted interpreter there; a copy whose lookup lacks --system
-      # must run it with the action in the workspace. A copy whose
-      # lookups lack --no-project must, with the action in the
-      # workspace, apply the planted pyproject.toml's requires-python,
-      # find no interpreter and stop; any Python it installs goes to a
-      # scratch directory, leaving the runner's uv-managed Pythons as
-      # they were.
+      # The step runs uv from the workspace, which holds a planted
+      # .venv; only its absolute --python keeps that out. A copy of the
+      # step without --python is the control that must run the planted
+      # interpreter.
       - name: "Extraction ignores PYTHONPATH and a workspace .venv"
         shell: bash
         env:
@@ -841,10 +972,13 @@ jobs:
               handle.write(script)
           PYEOF
 
-          # The extraction call as action.yaml writes it, line by line.
+          # The extraction call and the unsetting of PYTHON* variables
+          # as action.yaml writes them, line by line.
           cat > "${step}.call" <<'EOF'
-          uv run --quiet --no-config --no-project --python "${py}" \
-              --with 'pyyaml==6.0.3' python -I "${work_dir}/extract.py"
+              PYTHON*|__PYVENV_LAUNCHER__) unset "${name}" ;;
+          "${UV}" run --quiet --no-config --no-project \
+              --python "${INTERPRETER}" --with 'pyyaml==6.0.3' \
+              python -I "${work_dir}/extract.py"
           EOF
           while IFS= read -r line; do
             grep -qxF -- "${line}" "${step}" || {
@@ -852,72 +986,59 @@ jobs:
               exit 1
             }
           done < "${step}.call"
-          sed 's/python -I "/python "/' "${step}" > "${step}.control"
-          # The pattern is literal text from action.yaml, not shell.
+          # The patterns are literal text from action.yaml, not shell.
           # shellcheck disable=SC2016
-          sed 's/ --python "\${py}"//' "${step}" > "${step}.venv-control"
-          sed 's/uv python find --system/uv python find/' "${step}" \
-            > "${step}.system-control"
-          sed 's/find --system --no-project/find --system/' "${step}" \
-            > "${step}.project-control"
-          for control in "${step}.control" "${step}.venv-control" \
-            "${step}.system-control" "${step}.project-control"; do
+          sed -e 's/python -I "/python "/' \
+            -e 's/) unset "\${name}" ;;/) ;;/' "${step}" > "${step}.control"
+          # shellcheck disable=SC2016
+          sed 's/ --python "\${INTERPRETER}"//' "${step}" \
+            > "${step}.venv-control"
+          for control in "${step}.control" "${step}.venv-control"; do
             if cmp -s "${step}" "${control}"; then
               echo "ERROR: ${control##*/} is not a changed copy ❌"
               exit 1
             fi
           done
 
-          action_copy="${RUNNER_TEMP}/action-copy"
-          mkdir -p "${action_copy}"
-          cp action.yaml "${action_copy}/"
+          # The interpreter the action installed in the run above
+          install_dir="${RUNNER_TEMP}/verify-release-schema/python"
+          interpreter="$(
+            cd "${install_dir}"
+            UV_NO_CONFIG=1 UV_NO_PROJECT=1 \
+              UV_PYTHON_INSTALL_DIR="${install_dir}" \
+              uv python find --managed-python 3.13
+          )"
+          uv_path="$(command -v uv)"
+
           mkdir -p .venv/bin
           echo 'home = /usr/bin' > .venv/pyvenv.cfg
-          for interpreter in .venv/bin/python .venv/bin/python3; do
+          for interpreter_bait in .venv/bin/python .venv/bin/python3; do
             printf '%s\n' '#!/bin/sh' \
-              "echo \"\$0\" >> '${venv_marker}'" 'exit 97' > "${interpreter}"
-            chmod +x "${interpreter}"
+              "echo \"\$0\" >> '${venv_marker}'" 'exit 97' \
+              > "${interpreter_bait}"
+            chmod +x "${interpreter_bait}"
           done
 
           run_step() {
-            # $1 script, $2 action directory; prints the step's output
-            # and keeps its log in fields-log
+            # $1 script; prints the step's output and keeps its log in
+            # fields-log
             rm -f "${marker}" "${venv_marker}"
             : > "${RUNNER_TEMP}/fields-output"
             GITHUB_OUTPUT="${RUNNER_TEMP}/fields-output" \
-              GITHUB_ACTION_PATH="$2" PYTHONPATH="${planted}" \
+              UV="${uv_path}" INTERPRETER="${interpreter}" \
+              PYTHONPATH="${planted}" \
               bash "$1" > "${RUNNER_TEMP}/fields-log" 2>&1 || true
             cat "${RUNNER_TEMP}/fields-output"
           }
-          check_shipped() {
-            # $1 output of the shipped step, $2 layout
-            if [ -e "${marker}" ]; then
-              echo "ERROR: the shipped step loaded a planted module" \
-                "($2) ❌"
-              cat "${marker}"
-              exit 1
-            fi
-            if [ -e "${venv_marker}" ]; then
-              echo "ERROR: the shipped step ran the planted .venv ($2) ❌"
-              cat "${venv_marker}"
-              exit 1
-            fi
-            if ! grep -A1 '^project<<' <<< "$1" \
-              | grep -qx 'test-project'; then
-              echo "ERROR: the shipped step did not write project ($2) ❌"
-              printf '%s\n' "$1"
-              exit 1
-            fi
-          }
 
-          run_step "${step}.control" "${action_copy}" > /dev/null
+          run_step "${step}.control" > /dev/null
           if [ ! -e "${marker}" ]; then
             echo "ERROR: the control without -I loaded no planted module ❌"
             exit 1
           fi
           echo "Control without -I loaded: $(tr '\n' ' ' < "${marker}")"
 
-          run_step "${step}.venv-control" "${action_copy}" > /dev/null
+          run_step "${step}.venv-control" > /dev/null
           if [ ! -e "${venv_marker}" ]; then
             echo "ERROR: the control without --python ran no planted" \
               "interpreter ❌"
@@ -926,34 +1047,202 @@ jobs:
           echo "Control without --python ran:" \
             "$(tr '\n' ' ' < "${venv_marker}")"
 
-          run_step "${step}.system-control" "${GITHUB_WORKSPACE}" \
-            > /dev/null
-          if [ ! -e "${venv_marker}" ]; then
-            echo "ERROR: the control without --system ran no planted" \
-              "interpreter ❌"
+          output="$(run_step "${step}")"
+          if [ -e "${marker}" ]; then
+            echo "ERROR: the shipped step loaded a planted module ❌"
+            cat "${marker}"
             exit 1
           fi
-          echo "Control without --system ran:" \
-            "$(tr '\n' ' ' < "${venv_marker}")"
-
-          scratch_python="${RUNNER_TEMP}/project-control-python"
-          project_output="$(
-            UV_PYTHON_INSTALL_DIR="${scratch_python}/install" \
-              UV_PYTHON_BIN_DIR="${scratch_python}/bin" \
-              run_step "${step}.project-control" "${GITHUB_WORKSPACE}"
-          )"
-          rm -rf "${scratch_python}"
-          if [ -n "${project_output}" ] || ! grep -q \
-            'no Python interpreter found' "${RUNNER_TEMP}/fields-log"; then
-            echo "ERROR: the control without --no-project did not stop" \
-              "on the planted requires-python ❌"
+          if [ -e "${venv_marker}" ]; then
+            echo "ERROR: the shipped step ran the planted .venv ❌"
+            cat "${venv_marker}"
+            exit 1
+          fi
+          if ! grep -A1 '^project<<' <<< "${output}" \
+            | grep -qx 'test-project'; then
+            echo "ERROR: the shipped step did not write project ❌"
+            printf '%s\n' "${output}"
             cat "${RUNNER_TEMP}/fields-log"
             exit 1
           fi
-          echo "Control without --no-project found no interpreter"
-
-          check_shipped "$(run_step "${step}" "${action_copy}")" \
-            "action outside the workspace"
-          check_shipped "$(run_step "${step}" "${GITHUB_WORKSPACE}")" \
-            "action in the workspace"
           echo "Extraction ignores PYTHONPATH and a workspace .venv ✅"
+
+  # A composite action inherits the caller job's environment, so an
+  # earlier step writing to GITHUB_ENV, as code from the caller's
+  # checkout may, must not choose the interpreter the action runs or
+  # the modules it imports. Each bait records that it ran and fails.
+  # The request leg names an interpreter through uv's own variables;
+  # the active-environment leg points at an active virtual or conda
+  # environment instead, leaving UV_PYTHON unset so it cannot mask that
+  # discovery. The action runs twice, cold and then warm with its
+  # Python already installed, and must still produce its outputs.
+  interpreter-isolation:
+    name: "Test callers cannot pick the Python run"
+    runs-on: "${{ matrix.os }}"
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-24.04", "macos-15"]
+        selector: ["request", "active-environment"]
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Plant bait and hostile settings (${{ matrix.selector }})"
+        shell: bash
+        env:
+          SELECTOR: "${{ matrix.selector }}"
+        run: |
+          set -euo pipefail
+          marker="${RUNNER_TEMP}/bait-ran"
+          ws="${GITHUB_WORKSPACE}"
+          real_python="$(command -v python3)"
+
+          bait() {
+            # $1 path of an executable that records its start and fails
+            printf '%s\n' '#!/bin/sh' \
+              "echo \"\$0 \$*\" >> '${marker}'" 'exit 1' > "$1"
+            chmod +x "$1"
+          }
+          mkdir -p "${ws}/.venv/bin" "${ws}/.venv/conda-meta" \
+            "${ws}/xdg-bin" "${ws}/pkg/urllib" "${ws}/urllib"
+          for name in python python3 python3.13 uv; do
+            bait "${ws}/.venv/bin/${name}"
+          done
+          for name in env bash; do
+            bait "${ws}/xdg-bin/${name}"
+          done
+          printf '%s\n' 'home = /usr/bin' \
+            'include-system-site-packages = false' 'version = 3.13.0' \
+            > "${ws}/.venv/pyvenv.cfg"
+          for dir in "${ws}" "${ws}/pkg"; do
+            for module in json.py base64.py sitecustomize.py \
+              usercustomize.py urllib/__init__.py; do
+              printf '%s\n' \
+                "open('${marker}', 'a').write(__file__ + '\\n')" \
+                > "${dir}/${module}"
+            done
+          done
+
+          case "${RUNNER_ARCH}" in
+            X64) arch=x86_64 ;;
+            ARM64) arch=aarch64 ;;
+            *) echo "ERROR: unexpected RUNNER_ARCH ${RUNNER_ARCH} ❌"
+               exit 1 ;;
+          esac
+          {
+            echo "PYTHONPATH=pkg:."
+            echo "PYTHONHOME=${ws}/.venv"
+            echo "PYTHONUSERBASE=${ws}"
+            echo "PYTHONSTARTUP=${ws}/sitecustomize.py"
+            echo "PYTHONEXECUTABLE=${ws}/.venv/bin/python"
+            echo "__PYVENV_LAUNCHER__=${ws}/.venv/bin/python"
+            echo "UV_NO_CACHE=1"
+            echo "UV_PYTHON_ARCH=${arch}"
+            echo "UV_PYTHON_INSTALL_MIRROR=https://127.0.0.1:9"
+            echo "XDG_BIN_HOME=${ws}/xdg-bin"
+            case "${SELECTOR}" in
+              request)
+                echo "UV_PYTHON=${ws}/.venv/bin/python"
+                echo "UV_PYTHON_SEARCH_PATH=${ws}/.venv/bin"
+                echo "UV_PYTHON_INSTALL_DIR=${ws}/uv-python"
+                echo "UV_PYTHON_PREFERENCE=only-system"
+                ;;
+              active-environment)
+                echo "VIRTUAL_ENV=${ws}/.venv"
+                echo "CONDA_PREFIX=${ws}/.venv"
+                echo "CONDA_DEFAULT_ENV=base"
+                echo "UV_INTERNAL__PARENT_INTERPRETER=${ws}/.venv/bin/python"
+                echo "UV_INTERNAL__TEST_PYTHON_MANAGED=1"
+                echo "UV_CACHE_DIR=${ws}/uv-cache"
+                ;;
+            esac
+          } >> "${GITHUB_ENV}"
+          # PATH=$GITHUB_WORKSPACE/.venv/bin:$PATH for later steps
+          echo "${ws}/.venv/bin" >> "${GITHUB_PATH}"
+
+          # Control: the bait must be live, or a clean run proves nothing.
+          # A python3 looked up on the planted PATH runs the bait, and a
+          # Python started without -I imports the planted modules.
+          (
+            cd "${ws}"
+            PATH="${ws}/.venv/bin:${PATH}" python3 -c 'pass' || true
+            PYTHONPATH=pkg:. "${real_python}" -c 'import json' || true
+          )
+          if ! grep -q '/.venv/bin/python3' "${marker}" 2> /dev/null \
+            || ! grep -q 'json.py' "${marker}"; then
+            echo "ERROR: the control did not run the bait ❌"
+            cat "${marker}" 2> /dev/null || true
+            exit 1
+          fi
+          echo "Control ran the bait: $(tr '\n' ' ' < "${marker}")"
+          rm -f "${marker}"
+
+      - name: "Verify maven release (cold)"
+        id: cold
+        uses: $/
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/test-release-maven.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Verify maven release (warm)"
+        id: warm
+        uses: $/
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/test-release-maven.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Assert no bait ran and both runs produced outputs"
+        shell: bash
+        env:
+          COLD_PROJECT: "${{ steps.cold.outputs.project }}"
+          COLD_VERSION: "${{ steps.cold.outputs.version }}"
+          COLD_TAG_RELEASE: "${{ steps.cold.outputs.tag_release }}"
+          WARM_PROJECT: "${{ steps.warm.outputs.project }}"
+          WARM_VERSION: "${{ steps.warm.outputs.version }}"
+          WARM_TAG_RELEASE: "${{ steps.warm.outputs.tag_release }}"
+        run: |
+          set -euo pipefail
+          rc=0
+          check() {
+            # $1 output name, $2 expected, $3 actual
+            if [ "$2" != "$3" ]; then
+              printf 'ERROR: %s: expected %q, got %q ❌\n' "$1" "$2" "$3"
+              rc=1
+            fi
+          }
+          check "cold project" test-project "${COLD_PROJECT}"
+          check "cold version" 1.0.0 "${COLD_VERSION}"
+          check "cold tag_release" true "${COLD_TAG_RELEASE}"
+          check "warm project" test-project "${WARM_PROJECT}"
+          check "warm version" 1.0.0 "${WARM_VERSION}"
+          check "warm tag_release" true "${WARM_TAG_RELEASE}"
+          if [ -e "${RUNNER_TEMP}/bait-ran" ]; then
+            echo "ERROR: planted bait ran ❌"
+            cat "${RUNNER_TEMP}/bait-ran"
+            rc=1
+          fi
+          case ":${PATH}:" in
+            *":${GITHUB_WORKSPACE}/xdg-bin:"*)
+              echo "ERROR: the caller's XDG_BIN_HOME is on PATH ❌"
+              rc=1
+              ;;
+          esac
+          if [ "${rc}" -eq 0 ]; then
+            echo "No bait ran, and both runs produced outputs ✅"
+          fi
+          exit "${rc}"

@@ -168,6 +168,14 @@ naming the field and the type it found. Quoting preserves the value.
   directory on the runner alone, which lasts for the job. The test
   workflow fails if any `setup-uv` step in the repository omits the
   setting.
+- The caller's environment does not choose the Python the action
+  runs. A composite action inherits the caller job's environment, so
+  the action installs its own uv-managed Python 3.13 under
+  `runner.temp`, with uv started from an empty environment, and passes
+  that interpreter by absolute path to every `uv` call. `PATH`,
+  `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `PYTHON*` variables and
+  similar settings from earlier steps do not change it, and Python
+  always starts in isolated mode (`-I`).
 
 ## Requirements/Dependencies
 
@@ -181,7 +189,8 @@ validation. By default the action runs the latest version of
 `lftools-uv` published on PyPI; set the optional `lftools-uv-version`
 input to pin to a specific version for reproducible runs. The action
 does not require a pre-existing Python or `pip` installation — `uv`
-provides its own managed Python toolchain.
+installs the managed Python the action runs, and the action ignores
+any Python the runner or the caller provides.
 
 ## Notes
 

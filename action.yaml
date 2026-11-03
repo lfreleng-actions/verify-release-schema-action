@@ -81,40 +81,84 @@ outputs:
 runs:
   using: "composite"
   steps:
-    # Install uv (which provides `uvx`) on the runner. uvx creates an
-    # isolated virtual environment for the lftools-uv invocation, so we
-    # do not pollute the runner's global Python environment.
+    # Install uv (which provides `uv tool run`, alias `uvx`) on the
+    # runner. A composite action inherits the caller job's environment,
+    # so nothing below may let a caller's PATH, UV_PYTHON, VIRTUAL_ENV,
+    # CONDA_PREFIX or similar choose the interpreter the action runs.
+    #
+    # setup-uv's only uv call for these inputs is "uv python find",
+    # whose result it executes. An invalid preference makes uv refuse
+    # its arguments before any lookup; setup-uv then reports the
+    # Python version as "unknown", which nothing reads. Pointing
+    # working-directory at the action's own directory keeps setup-uv
+    # from reading a required-version from the caller's files: the
+    # action ships neither uv.toml nor pyproject.toml, so the latest
+    # uv is installed. These variables apply to this step only.
     - name: "Install uv"
-      id: install-uv
+      id: setup-uv
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
-      # setup-uv runs 'uv python find' in its working-directory to
-      # report a Python version, then executes the interpreter found.
-      # That lookup searches the directory and its parents for a .venv
-      # and, without UV_NO_CONFIG, reads a .python-version. Pointing
-      # working-directory at the action's own directory, outside the
-      # caller's workspace, means neither is searched there; the input
-      # exports nothing to later steps. UV_SYSTEM_PYTHON makes the
-      # lookup skip virtual environments, including a workspace .venv
-      # above an action checked out inside the workspace ('uses: ./').
-      # Both variables apply to this step only, so the caller's later
-      # steps are unaffected.
-      env:
-        UV_NO_CONFIG: "1"
-        UV_SYSTEM_PYTHON: "1"
       with:
-        # Also where setup-uv looks for a required-version (uv.toml,
-        # then pyproject.toml), as no version input is set here. The
-        # action ships neither file, so the latest uv is installed.
         working-directory: "${{ github.action_path }}"
+        # Without it setup-uv puts the caller's HOME/XDG_* bin dir on PATH
+        tool-bin-dir: "${{ runner.temp }}/verify-release-schema/bin"
         # GitHub Actions caching stays off. A restored cache feeds the
         # environment that validates the release file and extracts the
         # outputs gating a release, and a cache written by a
         # less-trusted run in the same scope would be trusted on
         # restore (cache poisoning, CWE-349). setup-uv's default,
         # 'auto', caches on push events, so only an explicit false
-        # disables it. A cold install costs seconds per run.
+        # disables it; the post-step "uv cache prune" would also hit
+        # the invalid preference below. A cold install costs seconds.
         enable-cache: false
+      env:
+        UV_NO_CONFIG: '1'
+        UV_NO_PROJECT: '1'
+        UV_PYTHON_PREFERENCE: 'lookup-disabled'
+        # Inherited, it makes setup-uv probe uv, which the line above fails
+        UV_PYTHON_ARCH: ''
+        # yamllint disable-line rule:line-length
+        UV_PYTHON_INSTALL_DIR: "${{ runner.temp }}/verify-release-schema/python"
+
+    # A trusted interpreter: uv installs its own pinned, hash-checked
+    # build. uv runs with an empty environment plus an allow-list, so
+    # no caller variable can pick or redirect the interpreter. Every
+    # later uv and Python start names this interpreter by its path.
+    - name: "Install Python"
+      id: python
+      shell: bash
+      working-directory: "${{ github.action_path }}"
+      env:
+        UV: "${{ steps.setup-uv.outputs.uv-path }}"
+        INSTALL_DIR: "${{ runner.temp }}/verify-release-schema/python"
+        CACHE_DIR: "${{ runner.temp }}/verify-release-schema/cache"
+        PYTHON_VERSION: '3.13'
+      run: |
+        set -euo pipefail
+        clean=(UV_NO_CONFIG=1 UV_NO_PROJECT=1
+          "UV_PYTHON_INSTALL_DIR=$INSTALL_DIR" "UV_CACHE_DIR=$CACHE_DIR")
+        for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy \
+            https_proxy all_proxy no_proxy SSL_CERT_FILE SSL_CERT_DIR \
+            UV_NATIVE_TLS; do
+          if [ -n "${!name+set}" ]; then clean+=("$name=${!name}"); fi
+        done
+        # uv python find also searches the working directory and its
+        # parents for a .venv and runs the interpreter there before
+        # rejecting it as unmanaged. With 'uses: ./' the action
+        # directory is the caller's workspace, so look up from the
+        # action's own install directory instead.
+        mkdir -p "$INSTALL_DIR"
+        cd "$INSTALL_DIR"
+        env -i "${clean[@]}" "$UV" python install --quiet --no-bin \
+          "$PYTHON_VERSION"
+        PYTHON=$(env -i "${clean[@]}" "$UV" python find --managed-python \
+          "$PYTHON_VERSION")
+        case "$PYTHON" in
+          "$INSTALL_DIR"/*) ;;
+          *) echo "Error: uv found Python outside its install directory ❌"
+             exit 1 ;;
+        esac
+        echo "path=$PYTHON" >> "$GITHUB_OUTPUT"
 
     - name: "Set release schema"
       id: set-release-schema
@@ -161,6 +205,8 @@ runs:
         SCHEMA_REF: "${{ inputs['schema-ref'] }}"
         LFTOOLS_UV_VERSION: "${{ inputs['lftools-uv-version'] }}"
         ACTION_PATH: "${{ github.action_path }}"
+        UV: "${{ steps.setup-uv.outputs.uv-path }}"
+        INTERPRETER: "${{ steps.python.outputs.path }}"
       # yamllint disable-line rule:line-length
       run: |
         # Fail fast on any command error, undefined variable, or
@@ -184,17 +230,37 @@ runs:
         fi
 
         echo "INFO: Verifying ${RELEASE_FILE} against schema ${USE_SCHEMA}"
-        # Run lftools-uv via uvx; uvx creates an isolated, cached
-        # environment for the requested package and executes its CLI
-        # entry point. The `lftools-uv` command exposes the same
-        # `schema verify YAMLFILE SCHEMAFILE` sub-command as the legacy
-        # `lftools` tool.
+        # Run lftools-uv via uv tool run (uvx), which creates an
+        # isolated, cached environment for the requested package. The
+        # `lftools-uv` command exposes the same `schema verify YAMLFILE
+        # SCHEMAFILE` sub-command as the legacy `lftools` tool.
+        # --python names the trusted interpreter, so no caller variable
+        # picks it, and --no-config ignores uv configuration files, as
+        # the extraction below does. The console script would start
+        # Python without -I, letting the caller's PYTHONPATH or working
+        # directory supply modules, so the environment's own python
+        # loads the `lftools-uv` entry point in isolated mode instead.
         if [ -n "${LFTOOLS_UV_VERSION}" ]; then
             spec="lftools-uv==${LFTOOLS_UV_VERSION}"
         else
             spec="lftools-uv"
         fi
-        uvx --from "${spec}" lftools-uv schema verify \
+        entry_point='import sys
+        from importlib.metadata import entry_points
+        (script,) = entry_points(group="console_scripts", name="lftools-uv")
+        sys.argv[0] = "lftools-uv"
+        sys.exit(script.load()())'
+        # A caller's PYTHON* variables would reach every Python uv
+        # starts, including build backends that run without -I, and
+        # PYTHONEXECUTABLE or __PYVENV_LAUNCHER__ reset sys.prefix even
+        # under -I. None of them is the action's to honour.
+        for name in $(compgen -e); do
+          case "${name}" in
+            PYTHON*|__PYVENV_LAUNCHER__) unset "${name}" ;;
+          esac
+        done
+        "${UV}" tool run --no-config --python "${INTERPRETER}" \
+            --from "${spec}" python -I -c "${entry_point}" schema verify \
             "${RELEASE_FILE}" "${schema_path}"
 
     # Runs only once validation has passed, since a composite action
@@ -206,6 +272,8 @@ runs:
       shell: bash
       env:
         RELEASE_FILE: "${{ inputs['release-file'] }}"
+        UV: "${{ steps.setup-uv.outputs.uv-path }}"
+        INTERPRETER: "${{ steps.python.outputs.path }}"
       run: |
         set -euo pipefail
 
@@ -214,7 +282,7 @@ runs:
         # a boolean) all need real parsing; a regex would appear to
         # work on the fixtures and mis-read a file in the field.
         runner_tmp="${RUNNER_TEMP:-$(mktemp -d)}"
-        work_dir="$(mktemp -d -p "${runner_tmp}" vrs-fields.XXXXXX)"
+        work_dir="$(mktemp -d "${runner_tmp}/vrs-fields.XXXXXX")"
         trap 'rm -rf "${work_dir}"' EXIT
 
         cat > "${work_dir}/extract.py" <<'PYEOF'
@@ -315,40 +383,15 @@ runs:
                 print(f"INFO: {field} {state}")
         PYEOF
 
-        # uv run, even with --no-config, executes a .venv it finds in
-        # the working directory or a parent, so the interpreter is
-        # resolved from the action's own directory (outside the
-        # caller's workspace) and passed by absolute path. --system
-        # skips virtual environments, so a workspace .venv above an
-        # action checked out inside the workspace is not used either.
-        # --no-project stops the lookup applying the requires-python of
-        # a pyproject.toml above such a checkout, which UV_NO_CONFIG
-        # does not; the extraction needs any Python, not the caller's.
-        # 'uv python find' never downloads; when it finds nothing,
-        # install a managed Python as 'uv run' would have, so a runner
-        # without Python still works. With no version given, 'uv python
-        # install' takes uv's default and ignores requires-python.
-        py="$(
-          cd "${GITHUB_ACTION_PATH:?}" || exit 1
-          export UV_NO_CONFIG=1
-          uv python find --system --no-project 2> /dev/null \
-            || { uv python install --quiet >&2 \
-              && uv python find --system --no-project; }
-        )" || py=""
-        if [ -z "${py}" ]; then
-          echo "ERROR: no Python interpreter found or installed for uv"
-          exit 1
-        fi
-
-        # uv is already on PATH from the setup step above; --with keeps
-        # PyYAML in an isolated environment rather than installing it
-        # into whatever Python the runner happens to ship. --no-project
-        # stops uv discovering and syncing a pyproject.toml belonging to
-        # the caller, whose workspace this composite step runs in:
-        # without it, extraction could fail on the caller's unrelated
+        # uv and the interpreter both come by absolute path from the
+        # steps above, so no caller variable chooses either. --with
+        # keeps PyYAML in an isolated environment rather than installing
+        # it into the interpreter itself. --no-project stops uv
+        # discovering and syncing a pyproject.toml belonging to the
+        # caller, whose workspace this composite step runs in: without
+        # it, extraction could fail on the caller's unrelated
         # dependency constraints, or mutate their environment.
-        # --no-config stops uv reading the caller's .python-version,
-        # which would choose the interpreter, and a uv.toml there,
+        # --no-config stops uv reading a uv.toml of the caller's,
         # which could change the index PyYAML comes from. -I keeps the
         # working directory and PYTHON* variables out of the
         # interpreter's import path.
@@ -362,5 +405,15 @@ runs:
         # here. Deliberately not a caller input: PyYAML is an internal
         # implementation detail, and only safe_load is used, which has
         # been stable across the 6.x series.
-        uv run --quiet --no-config --no-project --python "${py}" \
-            --with 'pyyaml==6.0.3' python -I "${work_dir}/extract.py"
+        # A caller's PYTHON* variables would reach every Python uv
+        # starts, including build backends that run without -I, and
+        # PYTHONEXECUTABLE or __PYVENV_LAUNCHER__ reset sys.prefix even
+        # under -I. None of them is the action's to honour.
+        for name in $(compgen -e); do
+          case "${name}" in
+            PYTHON*|__PYVENV_LAUNCHER__) unset "${name}" ;;
+          esac
+        done
+        "${UV}" run --quiet --no-config --no-project \
+            --python "${INTERPRETER}" --with 'pyyaml==6.0.3' \
+            python -I "${work_dir}/extract.py"
