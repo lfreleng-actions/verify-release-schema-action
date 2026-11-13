@@ -81,6 +81,21 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # setup-uv skips its PATH and tool-bin-dir setup whenever
+    # UV_NO_MODIFY_PATH is defined, even as an empty string, so a step
+    # env entry cannot clear one inherited from the caller. Refuse it
+    # here rather than let the caller decide which uv and tools the
+    # job's PATH resolves.
+    - name: "Refuse an inherited UV_NO_MODIFY_PATH"
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${UV_NO_MODIFY_PATH+set}" ]; then
+          echo "::error::UV_NO_MODIFY_PATH is set in the caller's" \
+            "environment; unset it before calling this action" >&2
+          exit 1
+        fi
+
     # Install uv (which provides `uv tool run`, alias `uvx`) on the
     # runner. A composite action inherits the caller job's environment,
     # so nothing below may let a caller's PATH, UV_PYTHON, VIRTUAL_ENV,
