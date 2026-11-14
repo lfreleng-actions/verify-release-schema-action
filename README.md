@@ -175,7 +175,10 @@ naming the field and the type it found. Quoting preserves the value.
   that interpreter by absolute path to every `uv` call. `PATH`,
   `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX`, `PYTHON*` variables and
   similar settings from earlier steps do not change it, and Python
-  always starts in isolated mode (`-I`).
+  always starts in isolated mode (`-I`). The action fails before
+  installing uv when the caller's environment sets `UV_NO_MODIFY_PATH`,
+  even to an empty value: `setup-uv` would then skip its own `PATH`
+  setup, and a step-level override cannot unset the variable.
 
 ## Requirements/Dependencies
 
