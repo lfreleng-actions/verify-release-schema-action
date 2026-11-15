@@ -834,6 +834,127 @@ jobs:
           fi
           printf 'Rejected %s (%s) ✅\n' "${GUARD}" "${REASON}"
 
+  # The action refuses an inherited UV_NO_MODIFY_PATH, empty or not,
+  # because setup-uv skips its PATH setup whenever the variable is
+  # defined. A refused run must stop before setup-uv: setup-uv always
+  # exports UV_TOOL_BIN_DIR for the action's tool-bin-dir, so finding it
+  # unset afterwards proves setup-uv never ran. The unset case is the
+  # control, proving that marker appears when uv is installed.
+  uv-no-modify-path:
+    name: "Test UV_NO_MODIFY_PATH (${{ matrix.case }})"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: "unset"
+            set: false
+            value: ""
+            want: "success"
+          - case: "empty"
+            set: true
+            value: ""
+            want: "failure"
+          - case: "'1'"
+            set: true
+            value: "1"
+            want: "failure"
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # GITHUB_ENV rather than a step env entry, which cannot leave the
+      # variable unset for the unset case.
+      - name: "Set UV_NO_MODIFY_PATH (${{ matrix.case }})"
+        if: matrix.set
+        shell: bash
+        env:
+          VALUE: "${{ matrix.value }}"
+        run: |
+          set -euo pipefail
+          printf 'UV_NO_MODIFY_PATH=%s\n' "${VALUE}" >> "${GITHUB_ENV}"
+
+      # The assertions below mean nothing unless the caller's
+      # environment is what the case claims and the marker starts unset.
+      - name: "Confirm the caller environment (${{ matrix.case }})"
+        shell: bash
+        env:
+          SET: "${{ matrix.set }}"
+          VALUE: "${{ matrix.value }}"
+        run: |
+          set -euo pipefail
+          if [ "${SET}" = "true" ]; then
+            if [ -z "${UV_NO_MODIFY_PATH+set}" ] \
+              || [ "${UV_NO_MODIFY_PATH}" != "${VALUE}" ]; then
+              printf 'ERROR: UV_NO_MODIFY_PATH is not set to %q ❌\n' \
+                "${VALUE}"
+              exit 1
+            fi
+          elif [ -n "${UV_NO_MODIFY_PATH+set}" ]; then
+            echo "ERROR: UV_NO_MODIFY_PATH is set for the unset case ❌"
+            exit 1
+          fi
+          if [ -n "${UV_TOOL_BIN_DIR+set}" ]; then
+            echo "ERROR: UV_TOOL_BIN_DIR is set before the action ran ❌"
+            exit 1
+          fi
+          echo "Caller environment matches the case ✅"
+
+      - name: "UV_NO_MODIFY_PATH ${{ matrix.case }} (want ${{ matrix.want }})"
+        id: action
+        continue-on-error: true
+        uses: $/
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/test-release-maven.yaml"
+          lftools-uv-version: "${{ env.LFTOOLS_UV_VERSION }}"
+
+      - name: "Assert the ${{ matrix.case }} case outcome"
+        shell: bash
+        env:
+          CASE: "${{ matrix.case }}"
+          WANT: "${{ matrix.want }}"
+          OUTCOME: "${{ steps.action.outcome }}"
+          PROJECT: "${{ steps.action.outputs.project }}"
+          TOOL_BIN_DIR: "${{ runner.temp }}/verify-release-schema/bin"
+        run: |
+          set -euo pipefail
+          if [ "${OUTCOME}" != "${WANT}" ]; then
+            printf 'ERROR: %s: expected %s, got %s ❌\n' \
+              "${CASE}" "${WANT}" "${OUTCOME}"
+            exit 1
+          fi
+          if [ "${WANT}" = "success" ]; then
+            if [ "${PROJECT}" != "test-project" ]; then
+              printf 'ERROR: project output is %q ❌\n' "${PROJECT}"
+              exit 1
+            fi
+            if [ "${UV_TOOL_BIN_DIR-}" != "${TOOL_BIN_DIR}" ]; then
+              echo "ERROR: setup-uv did not export UV_TOOL_BIN_DIR, so" \
+                "the refused cases cannot prove it never ran ❌"
+              exit 1
+            fi
+            printf 'UV_NO_MODIFY_PATH %s: proceeded ✅\n' "${CASE}"
+          else
+            if [ -n "${UV_TOOL_BIN_DIR+set}" ]; then
+              echo "ERROR: setup-uv ran before the refusal ❌"
+              exit 1
+            fi
+            printf 'UV_NO_MODIFY_PATH %s: refused before uv ✅\n' "${CASE}"
+          fi
+
   # The action runs uv and Python from the caller's workspace. Files
   # there must not choose the interpreter, the package index or the
   # modules the extraction imports: each planted file records that it
