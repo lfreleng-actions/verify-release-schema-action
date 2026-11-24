@@ -17,10 +17,16 @@ inputs:
   lftools-uv-version:
     description: >
       Optional exact version of lftools-uv to run via uvx. When set,
-      the value is interpolated into `lftools-uv==<value>`, so it
-      MUST be a plain version string (for example `0.1.8`), not a
-      full PEP 440 pip specifier. Leave unset (the default) to use
-      the latest version published on PyPI.
+      the value is interpolated into `lftools-uv[pinned]==<value>`
+      (`lftools-uv==<value>` below 0.11.0), so it MUST be a plain
+      version string (for example `0.11.0`), not a full PEP 440 pip
+      specifier. From 0.11.0 the action asks for
+      lftools-uv's `pinned` extra, which pins every dependency to the
+      exact version lftools-uv's lock file records. Leave unset (the
+      default) to use the latest version published on PyPI, with that
+      release's pinned dependencies. A version below 0.11.0, or a
+      value that is not a plain version, runs with unpinned
+      dependencies and a warning.
     required: false
     default: ""
   schema-ref:
@@ -255,10 +261,55 @@ runs:
         # Python without -I, letting the caller's PYTHONPATH or working
         # directory supply modules, so the environment's own python
         # loads the `lftools-uv` entry point in isolated mode instead.
-        if [ -n "${LFTOOLS_UV_VERSION}" ]; then
-            spec="lftools-uv==${LFTOOLS_UV_VERSION}"
+        #
+        # From 0.11.0, lftools-uv's `pinned` extra names the exact
+        # version its lock file records for every dependency, so a new
+        # release of a dependency cannot reach this step unannounced.
+        # An older release has no such extra, and neither has a value
+        # that is not a plain version (0.5.*, 0.11.0rc1): those run as
+        # they always have, with floating dependencies and a warning,
+        # so nothing that ran before starts to fail.
+        version_at_least() {
+          # $1, $2 plain versions (digits and dots); true when $1 >= $2.
+          # Fields compare as numbers by length and then text, so no
+          # field is too long for shell arithmetic.
+          local -a have want
+          local i n a b
+          IFS=. read -r -a have <<< "$1"
+          IFS=. read -r -a want <<< "$2"
+          n=$(( ${#have[@]} > ${#want[@]} ? ${#have[@]} : ${#want[@]} ))
+          for (( i = 0; i < n; i++ )); do
+            a="${have[i]:-0}"
+            b="${want[i]:-0}"
+            a="${a#"${a%%[!0]*}"}"
+            b="${b#"${b%%[!0]*}"}"
+            if [ "${#a}" -ne "${#b}" ]; then
+              [ "${#a}" -gt "${#b}" ]
+              return
+            fi
+            if [ "${a}" != "${b}" ]; then
+              [[ "${a}" > "${b}" ]]
+              return
+            fi
+          done
+          return 0
+        }
+        first_pinned="0.11.0"
+        if [ -z "${LFTOOLS_UV_VERSION}" ]; then
+            spec="lftools-uv[pinned]"
+        elif [[ "${LFTOOLS_UV_VERSION}" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+            && version_at_least "${LFTOOLS_UV_VERSION}" "${first_pinned}"
+        then
+            spec="lftools-uv[pinned]==${LFTOOLS_UV_VERSION}"
         else
-            spec="lftools-uv"
+            spec="lftools-uv==${LFTOOLS_UV_VERSION}"
+            # Escaped, so the value cannot end the workflow command
+            shown="${LFTOOLS_UV_VERSION//%/%25}"
+            shown="${shown//$'\r'/%0D}"
+            shown="${shown//$'\n'/%0A}"
+            echo "::warning::lftools-uv-version ${shown} runs with" \
+              "unpinned dependencies; ${first_pinned} is the first" \
+              "lftools-uv release that pins them"
         fi
         entry_point='import sys
         from importlib.metadata import entry_points
