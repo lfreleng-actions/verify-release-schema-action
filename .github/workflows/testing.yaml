@@ -28,8 +28,11 @@ permissions: {}
 # reproducible and don't depend on whatever version of lftools-uv
 # happens to be the latest on PyPI on a given day. Consumers of the
 # action still get latest by default (see the action's input contract).
+# 0.11.0 is the first release with the pinned extra, which also fixes
+# the version of every dependency; the unpinned-release job covers an
+# older release.
 env:
-  LFTOOLS_UV_VERSION: "0.1.8"
+  LFTOOLS_UV_VERSION: "0.11.0"
 
 jobs:
   ### Test the GitHub Action in this Repository ###
@@ -505,6 +508,195 @@ jobs:
           )
           PYEOF
 
+  # The validation step asks for lftools-uv's pinned extra from 0.11.0
+  # and runs anything else unpinned, with one warning. The first check
+  # runs the step's own script against a stand-in for uv that records
+  # its --from argument; the second proves, with the real uv and the
+  # Python the action installs, that the extra pins jsonschema to the
+  # version lftools-uv's own metadata names for it.
+  lftools-uv-pinning:
+    name: "Test the lftools-uv pinned extra"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Install uv"
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          enable-cache: false
+
+      - name: "Extract the validation step from action.yaml"
+        id: step
+        shell: bash
+        run: |
+          set -euo pipefail
+          step="${RUNNER_TEMP}/validate-schema.sh"
+          uv run --quiet --no-config --no-project --with 'pyyaml==6.0.3' \
+            python -I - action.yaml "${step}" "${GITHUB_OUTPUT}" <<'PYEOF'
+          import sys
+          import yaml
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              steps = yaml.safe_load(handle)["runs"]["steps"]
+          by_id = {s.get("id"): s for s in steps}
+          with open(sys.argv[2], "w", encoding="utf-8") as handle:
+              handle.write(by_id["validate-schema"]["run"])
+          with open(sys.argv[3], "a", encoding="utf-8") as handle:
+              python = by_id["python"]["env"]["PYTHON_VERSION"]
+              handle.write(f"python={python}\n")
+          PYEOF
+          echo "path=${step}" >> "${GITHUB_OUTPUT}"
+
+      - name: "Assert the specifier for each lftools-uv-version"
+        shell: bash
+        env:
+          STEP: "${{ steps.step.outputs.path }}"
+        run: |
+          set -euo pipefail
+          stub="${RUNNER_TEMP}/uv-stand-in"
+          from_log="${RUNNER_TEMP}/uv-from"
+          cat > "${stub}" <<'EOF'
+          #!/bin/sh
+          while [ "$#" -gt 0 ]; do
+            if [ "$1" = "--from" ]; then
+              printf '%s\n' "$2" > "${STAND_IN_LOG}"
+              exit 0
+            fi
+            shift
+          done
+          exit 1
+          EOF
+          chmod +x "${stub}"
+
+          rc=0
+          # input|specifier|warnings
+          while IFS='|' read -r input want warnings; do
+            rm -f "${from_log}"
+            log="${RUNNER_TEMP}/validate-schema.log"
+            if ! USE_SCHEMA=release-schema.yaml \
+              RELEASE_FILE=tests/releases/test-release-maven.yaml \
+              SCHEMA_REF='' LFTOOLS_UV_VERSION="${input}" \
+              STAND_IN_LOG="${from_log}" \
+              ACTION_PATH="${GITHUB_WORKSPACE}" UV="${stub}" \
+              INTERPRETER=/nonexistent bash "${STEP}" > "${log}" 2>&1
+            then
+              printf 'ERROR: %q: the step failed ❌\n' "${input}"
+              cat "${log}"
+              rc=1
+              continue
+            fi
+            got="$(cat "${from_log}")"
+            count="$(grep -c '^::warning::' "${log}" || true)"
+            if [ "${got}" != "${want}" ] || [ "${count}" != "${warnings}" ]
+            then
+              printf 'ERROR: %q: expected %s with %s warning(s), got' \
+                "${input}" "${want}" "${warnings}"
+              printf ' %s with %s ❌\n' "${got}" "${count}"
+              rc=1
+            else
+              printf '%q: %s, %s warning(s) ✅\n' \
+                "${input}" "${got}" "${count}"
+            fi
+          done <<'EOF'
+          |lftools-uv[pinned]|0
+          0.11.0|lftools-uv[pinned]==0.11.0|0
+          0.12.3|lftools-uv[pinned]==0.12.3|0
+          0.100.0|lftools-uv[pinned]==0.100.0|0
+          1.0.0|lftools-uv[pinned]==1.0.0|0
+          0.1.8|lftools-uv==0.1.8|1
+          0.9.0|lftools-uv==0.9.0|1
+          0.10.1|lftools-uv==0.10.1|1
+          0.11.0rc1|lftools-uv==0.11.0rc1|1
+          0.5.*|lftools-uv==0.5.*|1
+          EOF
+          exit "${rc}"
+
+      - name: "Assert the pinned extra pins jsonschema"
+        shell: bash
+        env:
+          PYTHON_VERSION: "${{ steps.step.outputs.python }}"
+        run: |
+          set -euo pipefail
+          uv tool run --no-config --python "${PYTHON_VERSION}" \
+            --from "lftools-uv[pinned]==${LFTOOLS_UV_VERSION}" \
+            python -I - <<'PYEOF'
+          import re
+          import sys
+          from importlib.metadata import requires, version
+
+          pin = re.compile(
+              r"jsonschema\s*==\s*([^\s;]+)\s*;"
+              r"\s*extra\s*==\s*['\"]pinned['\"]"
+          )
+          pins = [
+              m.group(1)
+              for m in map(pin.fullmatch, requires("lftools-uv") or ())
+              if m
+          ]
+          if len(pins) != 1:
+              print(f"ERROR: the pinned extra names {pins!r} \u274c")
+              sys.exit(1)
+          have = version("jsonschema")
+          if have != pins[0]:
+              print(f"ERROR: jsonschema {have}, pinned {pins[0]} \u274c")
+              sys.exit(1)
+          print(f"jsonschema {have}, as the pinned extra names \u2705")
+          PYEOF
+
+  # Releases before 0.11.0 have no pinned extra and must keep working,
+  # unpinned, since callers still pass them.
+  unpinned-release:
+    name: "Test an lftools-uv release without the pinned extra"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a  # v2.22.4
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Verify maven release with lftools-uv 0.10.1"
+        id: verify
+        uses: $/
+        with:
+          distribution-type: "maven"
+          release-file: "tests/releases/test-release-maven.yaml"
+          lftools-uv-version: "0.10.1"
+
+      - name: "Assert the release validated"
+        shell: bash
+        env:
+          GOT_PROJECT: "${{ steps.verify.outputs.project }}"
+        run: |
+          set -euo pipefail
+          if [ "${GOT_PROJECT}" != "test-project" ]; then
+            printf 'ERROR: project output is %q ❌\n' "${GOT_PROJECT}"
+            exit 1
+          fi
+          echo "lftools-uv 0.10.1 validated the release ✅"
+
   # Dedicated job for failure-path testing so matrix parallelism doesn't
   # hide regressions specific to a single negative case.
   failure-tests:
@@ -806,7 +998,7 @@ jobs:
           FIXTURE: "${{ matrix.fixture }}"
         run: |
           set -euo pipefail
-          uvx --from "lftools-uv==${LFTOOLS_UV_VERSION}" \
+          uvx --from "lftools-uv[pinned]==${LFTOOLS_UV_VERSION}" \
             lftools-uv schema verify "${FIXTURE}" \
             schemas/release-schema.yaml
           echo "Schema-valid, so only extraction can reject it ✅"

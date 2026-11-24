@@ -55,12 +55,12 @@ steps:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name               | Required | Default                                   | Description                                                                                                                                                                       |
-| ------------------ | -------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| distribution-type  | True     |                                           | Release content type. Accepted values (lowercase, case-sensitive): `artifact`, `container`, `maven`, `npm`, `packagecloud`, `pypi`                                                |
-| release-file       | True     |                                           | Path to the release file describing the release contents                                                                                                                          |
-| lftools-uv-version | False    | _(empty — latest from PyPI)_              | Optional exact `lftools-uv` version to run via `uvx` (interpolated into `lftools-uv==<value>`, not a full pip specifier). Leave unset to use the latest version published on PyPI |
-| schema-ref         | False    | _(empty)_                                 | **Deprecated and ignored.** The action validates against its bundled schemas; setting this emits a warning and nothing else                                                       |
+| Name               | Required | Default                      | Description                                                                                                                                                                                                                                                                                                                                           |
+| ------------------ | -------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| distribution-type  | True     |                              | Release content type. Accepted values (lowercase, case-sensitive): `artifact`, `container`, `maven`, `npm`, `packagecloud`, `pypi`                                                                                                                                                                                                                    |
+| release-file       | True     |                              | Path to the release file describing the release contents                                                                                                                                                                                                                                                                                              |
+| lftools-uv-version | False    | _(empty — latest from PyPI)_ | Optional exact `lftools-uv` version to run via `uvx`: a plain version, not a full pip specifier. From `0.11.0` the action runs `lftools-uv[pinned]==<value>`, with every dependency pinned; an older or non-plain value runs `lftools-uv==<value>` unpinned, with a warning. Leave unset for the latest release on PyPI, with its pinned dependencies |
+| schema-ref         | False    | _(empty)_                    | **Deprecated and ignored.** The action validates against its bundled schemas; setting this emits a warning and nothing else                                                                                                                                                                                                                           |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -190,7 +190,15 @@ then invokes
 (the modernised successor to `lftools`) via `uvx` to perform schema
 validation. By default the action runs the latest version of
 `lftools-uv` published on PyPI; set the optional `lftools-uv-version`
-input to pin to a specific version for reproducible runs. The action
+input to pin to a specific version for reproducible runs. From
+`0.11.0`, `lftools-uv` has a `pinned` extra naming the exact version
+its lock file records for every dependency, and the action asks for
+it, so a new release of a dependency cannot change a run: an unset
+input still means the newest `lftools-uv`, now with that release's
+pinned dependencies. A version below `0.11.0`, or a value that is not
+a plain version (such as `0.5.*` or `0.11.0rc1`), runs without the extra:
+`uv` resolves its dependencies afresh on each run, to the newest they
+allow, and the action emits a warning saying so. The action
 does not require a pre-existing Python or `pip` installation — `uv`
 installs the managed Python the action runs, and the action ignores
 any Python the runner or the caller provides.
@@ -229,6 +237,10 @@ any Python the runner or the caller provides.
   valid. `distribution_type`, when present, must be `npm`; `git_tag`,
   `tag_release` and `ref` are optional.
 - The `schema verify` sub-command in `lftools-uv` is a direct port of
-  the original `lftools schema verify` implementation (same
-  `jsonschema.Draft4Validator` semantics), so validation results match
-  the legacy tool while avoiding its heavier, older dependency tree.
+  the original `lftools schema verify` implementation, so validation
+  results match the legacy tool while avoiding its heavier, older
+  dependency tree. Releases before `0.8.0` use
+  `jsonschema.Draft4Validator` for every schema; from `0.8.0` the
+  sub-command follows the draft a schema names in `$schema`, falling
+  back to Draft 4, which for every bundled schema is still
+  `Draft4Validator`.
